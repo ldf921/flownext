@@ -1,0 +1,14 @@
+# weights
+weights/
+logs/
+fig/
+
+# data
+Data/
+
+# editor
+.vscode/
+tox.ini
+
+# python
+__pycache__/

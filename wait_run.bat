@@ -1,0 +1,2 @@
+\\msra-ts003\c$\users\v-dinliu\AppData\Local\Continuum\anaconda3\python \\msralab\ProjectData\ehealth02\v-dinliu\Flow2D\wait.py 4800
+\\msra-ts003\c$\users\v-dinliu\AppData\Local\Continuum\anaconda3\python \\msralab\ProjectData\ehealth02\v-dinliu\Flow2D\main.py -d "0,1,2,3" --batch 32 --round 10000
