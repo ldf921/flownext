@@ -3,7 +3,7 @@ import re
 import numpy as np
 from timeit import default_timer
 
-def load(prefix, subset):
+def load(prefix, subset, samples = -1):
     pattern = re.compile('{}(\d+)_(\d+).bin'.format(subset) )
     files = [ (int(pattern.match(f).group(1) ), f) for f in os.listdir(prefix) if pattern.match(f) ]
     files = list(sorted(files))
@@ -11,7 +11,9 @@ def load(prefix, subset):
     for _, f in files:
         # t0 = default_timer()
         n = int(pattern.match(f).group(2) )
-        load_batch(os.path.join(prefix, f), n, ret) 
+        load_batch(os.path.join(prefix, f), n, ret)
+        if samples != -1 and len(ret) > samples:
+            break
         # print(f, (default_timer() - t0) / n)
     return zip(*ret)
 
