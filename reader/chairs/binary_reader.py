@@ -4,7 +4,7 @@ import numpy as np
 from timeit import default_timer
 
 def load(prefix, subset, samples = -1):
-    pattern = re.compile('{}(\d+)_(\d+).bin'.format(subset) )
+    pattern = re.compile(r'{}(\d+)_(\d+).bin'.format(subset) )
     files = [ (int(pattern.match(f).group(1) ), f) for f in os.listdir(prefix) if pattern.match(f) ]
     files = list(sorted(files))
     ret = []
