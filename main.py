@@ -119,9 +119,6 @@ train_epe = MovingAverage()
 from threading import Thread
 from queue import Queue
 
-data_queue = Queue(maxsize=100)
-aug_queue = Queue(maxsize=100)
-
 def iterate_data(iq, gen):
     while True:
         i = next(gen)
@@ -132,9 +129,21 @@ def random_aug(iq, oq):
         data = iq.get()
         oq.put(aug.apply(aug.random_params(), data))
 
+def batch_samples(iq, oq, batch_size):
+    while True:
+        data = []
+        for i in range(batch_size):
+            data.append(iq.get())
+        oq.put([np.stack(x, axis=0) for x in zip(*data)])
+
+data_queue = Queue(maxsize=100)
+aug_queue = Queue(maxsize=100)
+batch_queue = Queue(maxsize=4)
 Thread(target=iterate_data, args=(data_queue, train_gen)).start()
-for i in range(16):
+for i in range(20):
     Thread(target=random_aug, args=(data_queue, aug_queue)).start()
+for i in range(2):
+    Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)).start()
 
 def validate():
     batchEpe = []
@@ -161,9 +170,10 @@ while True:
     t2 = t0
     # for t, i in zip(range(batch_size), train_gen):
     #     batch.append(aug.apply(aug.random_params(), (trainImg1[i], trainImg2[i], trainFlow[i])))
-    log.log('steps={}, qsize={}'.format(steps, aug_queue.qsize()))
-    batch = [ aug_queue.get() for i in range(batch_size) ]
-    img1, img2, flow = [ nd.array(np.stack(x, axis=0), ctx=ctx) for x in zip(*batch) ]
+    # log.log('steps={}, qsize={}'.format(steps, aug_queue.qsize()))
+    # batch = [ aug_queue.get() for i in range(batch_size) ]
+    # img1, img2, flow = [ nd.array(np.stack(x, axis=0), ctx=ctx) for x in zip(*batch) ]
+    img1, img2, flow = map(lambda arr : nd.array(arr, ctx=ctx), batch_queue.get())
     loading_time.update(default_timer() - t0)
     epe = pipe.train_batch(img1, img2, flow)
     if steps <= 20 or steps % 50 == 0:
@@ -176,7 +186,7 @@ while True:
     if steps % 2500 == 0:
         val_epe = validate()
         log.log('steps={}, val_epe={}'.format(steps, val_epe))
-        pipe.network.save_params(os.path.join(repoRoot, 'weights', '{}.params'.format(steps)))
+        pipe.network.save_params(os.path.join(repoRoot, 'weights', '{}_{}.params'.format(run_id, steps)))
 
     if args.debug:
         val_epe = validate()
