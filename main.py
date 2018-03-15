@@ -74,11 +74,38 @@ else:
 
 print('data read, train {} val {}'.format(trainSize, validationSize))
 
-import augmentation
-aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.8, 1), target_shape=(320, 448) )
+import pipeline
+pipe = pipeline.Pipeline(ctx) 
 
+import logger
 steps = 0
+if args.checkpoint is not None:
+    weight_file = os.path.basename(args.checkpoint)
+    run_id, steps = re.match(r'(.+)_(\d+)\.params', weight_file).groups()
+    steps = int(steps)
+    pipe.network.load_params(args.checkpoint, ctx=pipe.ctx)
+else:
+    run_id = logger.FileLog._localtime().strftime('%b%d-%H%M')
+log = logger.FileLog('logs/{}.log'.format(run_id))
+log.log('start=1, train={}, val={}'.format(trainSize, validationSize))
 
+if args.valid:
+    val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
+    log.log('chairs.val:epe={}'.format(val_epe))
+    
+    sintel_dataset = sintel.list_data(sintel.sintel_path)
+    for k, dataset in sintel_dataset['training'].items():
+        img1, img2, flow = [[sintel.load(p) for p in data] for data in zip(*dataset)]
+        val_epe = pipe.validate(img1, img2, flow, batch_size=args.batch)
+        log.log('sintel.training.{}:epe={}'.format(k, val_epe))
+
+    log.close()
+    sys.exit(0)
+
+
+import augmentation
+aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.2, target_shape=(320, 448),
+                                       contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4))
 def index_generator(n):
     indices = np.arange(0, n, dtype=np.int)
     while True:
@@ -88,15 +115,6 @@ def index_generator(n):
 train_gen = index_generator(trainSize)
 from mxnet import gluon
 batch_size = args.batch
-
-
-import pipeline
-pipe = pipeline.Pipeline(ctx) 
-
-import logger
-run_id = logger.FileLog._localtime().strftime('%b%d-%H%M')
-log = logger.FileLog('logs/{}.log'.format(run_id))
-log.log('start=1, train={}, val={}'.format(trainSize, validationSize))
 
 class MovingAverage:
     def __init__(self, ratio=0.95):
@@ -136,33 +154,34 @@ def batch_samples(iq, oq, batch_size):
             data.append(iq.get())
         oq.put([np.stack(x, axis=0) for x in zip(*data)])
 
+def remove_file(iq):
+    while True:
+        f = iq.get()
+        try:
+            os.remove(f)
+        except OSError as e:
+            log.log('Remove failed' + e)
+
 data_queue = Queue(maxsize=100)
 aug_queue = Queue(maxsize=100)
 batch_queue = Queue(maxsize=4)
+remove_queue = Queue(maxsize=50)
 Thread(target=iterate_data, args=(data_queue, train_gen)).start()
-for i in range(20):
+Thread(target=remove_file, args=(remove_queue)).start()
+for i in range(30):
     Thread(target=random_aug, args=(data_queue, aug_queue)).start()
 for i in range(2):
     Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)).start()
 
-def validate():
-    batchEpe = []
-    for j in range(0, validationSize, batch_size):
-        if j + batch_size <= validationSize:
-            batchImg1 = validationImg1[j: j + batch_size]
-            batchImg2 = validationImg2[j: j + batch_size]
-            batchFlow = validationFlow[j: j + batch_size]
-
-            img1 = nd.array(np.transpose(np.stack(batchImg1, axis=0), (0, 3, 1, 2)) / 255.0, ctx=ctx)
-            img2 = nd.array(np.transpose(np.stack(batchImg2, axis=0), (0, 3, 1, 2)) / 255.0, ctx=ctx)
-            flow = nd.array(np.transpose(np.stack(batchFlow, axis=0), (0, 3, 1, 2)), ctx=ctx)
-            
-            batchEpe.append(pipe.validate_batch(img1, img2, flow))
-    return np.mean(np.concatenate(batchEpe))
-
 t2 = None
+lr_scedule = [(300_000, 1e-4), (400_000, 1e-4 / 2), (500_000, 1e-4 / 4), (600_000, 1e-4 / 8)]
+pipe.trainer.set_learning_rate(lr_scedule[0][1])
+checkpoints = []
 while True:
     steps += 1
+    while steps > lr_scedule[0][0]:
+        lr_scedule = lr_scedule[1:]
+        pipe.trainer.set_learning_rate(lr_scedule[0][1])
     batch = []
     t0 = default_timer()
     if t2:
@@ -184,12 +203,19 @@ while True:
         # lens = nd.mean(nd.sum(nd.abs(vecs), axis=-1))
         # print(lens.asscalar())
     if steps % 2500 == 0:
-        val_epe = validate()
+        val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=batch_size*2)
         log.log('steps={}, val_epe={}'.format(steps, val_epe))
-        pipe.network.save_params(os.path.join(repoRoot, 'weights', '{}_{}.params'.format(run_id, steps)))
+        prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
+        pipe.network.save_params(prefix + '.params')
+        pipe.trainer.save_states(prefix + '.states')
+        checkpoints.append(os.path.join(repoRoot, prefix))
+        if len(checkpoints) > 3:
+            prefix = checkpoints[0]
+            checkpoints = checkpoints[1:]
+            remove_queue.put(prefix + '.params')
+            remove_queue.put(prefix + '.states')
 
     if args.debug:
-        val_epe = validate()
         log.log('steps={}, val_epe={}'.format(steps, val_epe))
         # network.save_params(os.path.join(repoRoot, 'weights', '{}.params'.format(steps)))        
         break
