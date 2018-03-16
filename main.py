@@ -104,8 +104,9 @@ if args.valid:
 
 
 import augmentation
-aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.2, target_shape=(320, 448),
-                                       contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4))
+aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.2, target_shape=(320, 448))
+color_aug = augmentation.ColorAugmentation(contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4), batch_size=args.batch)
+color_aug.hybridize()
 def index_generator(n):
     indices = np.arange(0, n, dtype=np.int)
     while True:
@@ -167,7 +168,7 @@ aug_queue = Queue(maxsize=100)
 batch_queue = Queue(maxsize=4)
 remove_queue = Queue(maxsize=50)
 Thread(target=iterate_data, args=(data_queue, train_gen)).start()
-Thread(target=remove_file, args=(remove_queue)).start()
+Thread(target=remove_file, args=(remove_queue,)).start()
 for i in range(30):
     Thread(target=random_aug, args=(data_queue, aug_queue)).start()
 for i in range(2):
@@ -193,6 +194,7 @@ while True:
     # batch = [ aug_queue.get() for i in range(batch_size) ]
     # img1, img2, flow = [ nd.array(np.stack(x, axis=0), ctx=ctx) for x in zip(*batch) ]
     img1, img2, flow = map(lambda arr : nd.array(arr, ctx=ctx), batch_queue.get())
+    img1, img2 = color_aug(img1, img2)
     loading_time.update(default_timer() - t0)
     epe = pipe.train_batch(img1, img2, flow)
     if steps <= 20 or steps % 50 == 0:
@@ -208,7 +210,7 @@ while True:
         prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
         pipe.network.save_params(prefix + '.params')
         pipe.trainer.save_states(prefix + '.states')
-        checkpoints.append(os.path.join(repoRoot, prefix))
+        checkpoints.append(prefix)
         if len(checkpoints) > 3:
             prefix = checkpoints[0]
             checkpoints = checkpoints[1:]
