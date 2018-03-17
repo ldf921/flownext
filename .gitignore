@@ -12,3 +12,4 @@ tox.ini
 
 # python
 __pycache__/
+.ipynb_checkpoints/
