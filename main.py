@@ -32,7 +32,7 @@ repoRoot = r'\\msralab\ProjectData\ehealth02\v-dinliu\Flow2D'
 if args.device == "":
     ctx = mx.cpu()
 else:
-    ctx = mx.gpu(int(args.device))
+    ctx = [mx.gpu(gpu_id) for gpu_id in map(int, args.device.split(','))]
 
 
 # load training set and validation set
@@ -104,8 +104,12 @@ if args.valid:
 
 
 import augmentation
-aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.2, target_shape=(320, 448))
-color_aug = augmentation.ColorAugmentation(contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4), batch_size=args.batch)
+batch_size_card = args.batch
+batch_size = batch_size_card * len(ctx)
+aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
+                                        orig_shape=(384, 512), batch_size=batch_size_card)
+color_aug = augmentation.ColorAugmentation(contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4), batch_size=batch_size_card)
+aug.hybridize()
 color_aug.hybridize()
 def index_generator(n):
     indices = np.arange(0, n, dtype=np.int)
@@ -115,7 +119,6 @@ def index_generator(n):
 
 train_gen = index_generator(trainSize)
 from mxnet import gluon
-batch_size = args.batch
 
 class MovingAverage:
     def __init__(self, ratio=0.95):
@@ -146,7 +149,7 @@ def iterate_data(iq, gen):
 def random_aug(iq, oq):
     while True:
         data = iq.get()
-        oq.put(aug.apply(aug.random_params(), data))
+        oq.put([np.transpose(arr, (2, 0, 1)) for arr in data])
 
 def batch_samples(iq, oq, batch_size):
     while True:
@@ -169,7 +172,7 @@ batch_queue = Queue(maxsize=4)
 remove_queue = Queue(maxsize=50)
 Thread(target=iterate_data, args=(data_queue, train_gen)).start()
 Thread(target=remove_file, args=(remove_queue,)).start()
-for i in range(30):
+for i in range(16):
     Thread(target=random_aug, args=(data_queue, aug_queue)).start()
 for i in range(2):
     Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)).start()
@@ -193,10 +196,9 @@ while True:
     # log.log('steps={}, qsize={}'.format(steps, aug_queue.qsize()))
     # batch = [ aug_queue.get() for i in range(batch_size) ]
     # img1, img2, flow = [ nd.array(np.stack(x, axis=0), ctx=ctx) for x in zip(*batch) ]
-    img1, img2, flow = map(lambda arr : nd.array(arr, ctx=ctx), batch_queue.get())
-    img1, img2 = color_aug(img1, img2)
+    img1, img2, flow = map(lambda arr : nd.array(arr), batch_queue.get())
     loading_time.update(default_timer() - t0)
-    epe = pipe.train_batch(img1, img2, flow)
+    epe = pipe.train_batch(img1, img2, flow, color_aug, aug)
     if steps <= 20 or steps % 50 == 0:
         train_epe.update(epe.asscalar())
         log.log('steps={}, epe={}, loading_time={:.2f}, total_time={:.2f}'.format(steps, train_epe.average, loading_time.average, total_time.average))
@@ -205,7 +207,7 @@ while True:
         # lens = nd.mean(nd.sum(nd.abs(vecs), axis=-1))
         # print(lens.asscalar())
     if steps % 2500 == 0:
-        val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=batch_size*2)
+        val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
         log.log('steps={}, val_epe={}'.format(steps, val_epe))
         prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
         pipe.network.save_params(prefix + '.params')

@@ -1,6 +1,7 @@
 import mxnet as mx
 from mxnet.gluon import nn
 from mxnet import nd
+import numpy as np
 
 
 class Downsample(nn.HybridBlock):
@@ -34,6 +35,26 @@ class Downsample(nn.HybridBlock):
                             num_filter=1)
         return F.broadcast_div(F.reshape(img, [-4, -1, 2, -3, -2]), F.reshape(nom, [-4, -1, 2, -3, -2]))
 
+class Bilinear(mx.initializer.Initializer):
+    def _init_weight(self, _, arr):
+        weight = np.zeros(arr.shape)
+        w = weight.shape[2]
+        c = w // 2 
+        for k in range(weight.shape[0]):
+            for i in range(w):
+                for j in range(w):
+                    weight[k, k, i, j] = (1 - abs(i - c) / (c + 1)) * (1 - abs(j - c) / (c + 1))
+        arr[:] = weight
+
+class Upsample(nn.HybridBlock):
+    def __init__(self, channels, factor, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.upsamp = nn.Conv2DTranspose(channels, factor * 2 - 1, strides=factor, padding=factor - 1, weight_initializer=Bilinear())
+
+    def hybrid_forward(self, F, img):
+        img = F.pad(img, mode='edge', pad_width=(0, 0, 0, 0, 0, 1, 0, 1))
+        return self.upsamp(img)[:, :, :-1, :-1]
 
 class Flownet(nn.HybridBlock):
     def __init__(self, **kwargs):
@@ -115,12 +136,20 @@ def multiscale_epe(flow, predictions):
 
 
 if __name__ == '__main__':
-    flownet = Flownet()
-    img1 = nd.random_uniform(shape=(5, 3, 320, 448))
-    img2 = nd.random_uniform(shape=(5, 3, 320, 448))
-    flow = nd.random_uniform(shape=(5, 2, 320, 448))
-    flownet = Flownet()
-    flownet.collect_params().initialize()
-    pred = flownet(img1, img2)
-    loss = multiscale_epe(flow, pred)
-    print(loss.asnumpy())
+
+    img = nd.arange(16).reshape((1, 1, 4, 4))
+    img = nd.repeat(img, repeats=2, axis=1)
+    upsamp = Upsample(2, 4)
+    upsamp.collect_params().initialize()
+    print(img)
+    print(upsamp(img))    
+
+    # flownet = Flownet()
+    # img1 = nd.random_uniform(shape=(5, 3, 320, 448))
+    # img2 = nd.random_uniform(shape=(5, 3, 320, 448))
+    # flow = nd.random_uniform(shape=(5, 2, 320, 448))
+    # flownet = Flownet()
+    # flownet.collect_params().initialize()
+    # pred = flownet(img1, img2)
+    # loss = multiscale_epe(flow, pred)
+    # print(loss.asnumpy())
