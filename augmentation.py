@@ -26,7 +26,7 @@ class ColorAugmentation(nn.HybridBlock):
         return ret
 
 class GeometryAugmentation(nn.HybridBlock):
-    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size, relative=False):
+    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size, relative_angle=None, relative_scale=None):
         super().__init__()
         self._angle_range = tuple(map(lambda x : x / 180 * math.pi, angle_range) )
         self._scale_range = zoom_range
@@ -41,7 +41,29 @@ class GeometryAugmentation(nn.HybridBlock):
         self._orig_shape = np.array(orig_shape)
         self._batch_size = batch_size
         self._unit = np.flip(self._target_shape - 1, axis=0).reshape([2,1]) / np.flip(self._orig_shape - 1, axis=0).reshape([1,2])
-        self._relative = relative
+        self._relative = relative_angle is not None 
+        if self._relative:
+            self._relative_scale = relative_scale
+            self._relative_angle = tuple(map(lambda x : x / 180 * math.pi * relative_angle, angle_range) )
+
+    def _get_relative_transform(self, F):
+        aspect_ratio = (self._target_shape[0] - 1) / (self._target_shape[1] - 1)
+        rotation = F.random.uniform(*self._relative_angle, shape=(self._batch_size))
+        scale = F.random.uniform(*self._relative_scale, shape=(self._batch_size))
+        # print(rotation.asscalar(), scale.asscalar())
+        affine_params = [scale * rotation.cos(), scale * -rotation.sin() * aspect_ratio, F.zeros_like(scale),
+                         scale * rotation.sin() / aspect_ratio, scale * rotation.cos(),  F.zeros_like(scale),
+                         F.zeros_like(scale), F.zeros_like(scale), F.ones_like(scale)]
+        affine = F.reshape(F.stack(*affine_params, axis=1), [0, 3, 3])
+        inverse = F.stack(
+            rotation.cos() / scale, 
+            rotation.sin() / scale,
+            -rotation.sin() / scale, 
+            rotation.cos() / scale,
+            axis=1
+        )
+        inverse = F.reshape(inverse, [0, 2, 2])
+        return affine, inverse
         
     def hybrid_forward(self, F, img1, img2, flow):
         '''
@@ -54,29 +76,65 @@ class GeometryAugmentation(nn.HybridBlock):
         translation_y = F.random.uniform(-1, 1, shape=(self._batch_size,)) * pad_y + F.random.uniform(*self._translation_range, shape=(self._batch_size))
         affine_params = [scale * rotation.cos() * self._unit[0, 0], scale * -rotation.sin() * self._unit[1, 0], translation_x,
                          scale * rotation.sin() * self._unit[0, 1], scale * rotation.cos() * self._unit[1, 1],  translation_y] 
-        if not self._relative:
-            affine_params = F.stack(*affine_params, axis=1)
-            concat_img = F.concat(img1 / 255.0, img2 / 255.0, flow, dim=1)
-            grid = F.GridGenerator(data=affine_params, transform_type='affine', target_shape=list(self._target_shape))
-            concat_img = F.BilinearSampler(data=concat_img, grid=grid)
-
-            flow = F.slice_axis(concat_img, axis=1, begin=6, end=8)
-
-            affine_inverse = F.stack(
+        affine_params = F.stack(*affine_params, axis=1)
+        affine_inverse = F.stack(
                 rotation.cos() / scale, 
                 rotation.sin() / scale,
                 -rotation.sin() / scale, 
                 rotation.cos() / scale,
                 axis=1
             )
-            linv = F.reshape(affine_inverse, [0, 2, 2])
+        linv = F.reshape(affine_inverse, [0, 2, 2])
+
+        if not self._relative:
+            concat_img = F.concat(img1 / 255.0, img2 / 255.0, flow, dim=1)
+            grid = F.GridGenerator(data=affine_params, transform_type='affine', target_shape=list(self._target_shape))
+            concat_img = F.BilinearSampler(data=concat_img, grid=grid)
+
+            flow = F.slice_axis(concat_img, axis=1, begin=6, end=8)    
             flow = F.reshape_like(F.batch_dot(linv, F.reshape(flow, (0, 0, -3))), flow)
             img1, img2 = F.slice_axis(concat_img, axis=1, begin=0, end=3), F.slice_axis(concat_img, axis=1, begin=3, end=6)
             return img1, img2, flow
+        else:
+            # affine_2 = affine * rel_affine  (left matrix multiply)
+            # affine^{-1}_2 = rel_inverse * linv
+            # x2 = (O - 1) *  [W_2 (x'_2 / ((T - 1) / 2) - (1, 1) ) + b_2 + (1, 1)]
+            # x1 = W_1 x'_1 + b_1 
+            # x'_2−x'_1  = (W_2^(−1)  W_1−I)  x'_1  + b_1  − b_2  + W_2^(−1)  f(x_1)
+            # (W_2^(−1)  W_1−I) * (x'_1 - (Ts - 1) / 2)
+            rel_affine, rel_inverse = self._get_relative_transform(F)
+            affine_2 = F.reshape(F.batch_dot(F.reshape(affine_params, [0, 2, 3]), rel_affine), [0, 6])
 
+            concat_img = F.concat(img1 / 255.0, flow, dim=1)
+            grid = F.GridGenerator(data=affine_params, transform_type='affine', target_shape=list(self._target_shape))
+            concat_img = F.BilinearSampler(data=concat_img, grid=grid)
+            img1 = F.slice_axis(concat_img, axis=1, begin=0, end=3)    
+            flow = F.slice_axis(concat_img, axis=1, begin=3, end=5)
+
+            grid_2 = F.GridGenerator(data=affine_2, transform_type='affine', target_shape=list(self._target_shape))
+            img2 = F.BilinearSampler(data=img2 / 255.0, grid=grid_2)
+
+            inverse_2 = F.batch_dot(rel_inverse, linv)
+            flow = F.reshape_like(F.batch_dot(inverse_2, F.reshape(flow, (0, 0, -3))), flow)
+
+            scale = F.stack(F.ones([self._batch_size]) * (self._target_shape[1] - 1) / 2,
+                            F.zeros([self._batch_size]),
+                            F.zeros([self._batch_size]),
+                            F.ones([self._batch_size]) * (self._target_shape[0] - 1) / 2,
+                            axis=1) 
+            scale = F.reshape(scale, [0, 2, 2])
+            I = F.reshape(F.one_hot(F.arange(0, 2), depth=2), [1, 2, 2])
+            grid = F.GridGenerator(data=F.reshape(F.one_hot(F.arange(0, 2), depth=3), [1, 6]),
+                                   transform_type='affine',
+                                   target_shape=list(self._target_shape))
+            grid = F.reshape(F.repeat(grid, axis=0, repeats=self._batch_size), [0, 0, -3])
+            factor = F.batch_dot(F.broadcast_minus(rel_inverse, I), scale)
+            flow = flow + F.reshape_like(F.batch_dot(factor, grid), flow)
+            return img1, img2, flow
+            
 class GeometryAugmentationCpu:
     def __init__(self, angle_range, zoom_range, translation_range, target_shape):
-        self._angle_range = tuple(map(lambda x : x / 180 * math.pi, angle_range) )
+        self._angle_range = tuple(map(lambda x : x / 180 * math.pi, angle_range))
         self._scale_range = zoom_range
         try:
             translation_range = tuple(translation_range)

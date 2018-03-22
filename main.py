@@ -24,6 +24,7 @@ parser.add_argument('--net_args', type=str, default='', help='network arguments'
 parser.add_argument('--batch', type=int, default=8, help='size of minibatch')
 parser.add_argument('--round', type=int, default=100000, help='number of minibatches per epoch')
 parser.add_argument('-c', '--checkpoint', type=str, default=None, help='model heckpoint to load')
+parser.add_argument('--relative', type=str, default="")
 args = parser.parse_args()
 
 # repoRoot = os.path.dirname(os.path.realpath(__file__))
@@ -109,8 +110,12 @@ if args.valid:
 import augmentation
 batch_size_card = args.batch
 batch_size = batch_size_card * len(ctx)
-aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
-                                        orig_shape=(384, 512), batch_size=batch_size_card)
+if args.relative == "":
+    aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
+                                            orig_shape=(384, 512), batch_size=batch_size_card)
+elif args.relative == "M":
+    aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
+                                            orig_shape=(384, 512), batch_size=batch_size_card, relative_angle=0.25, relative_scale=(0.96, 1 / 0.96))
 color_aug = augmentation.ColorAugmentation(contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4), batch_size=batch_size_card)
 aug.hybridize()
 color_aug.hybridize()
@@ -221,8 +226,3 @@ while True:
             checkpoints = checkpoints[1:]
             remove_queue.put(prefix + '.params')
             remove_queue.put(prefix + '.states')
-
-    if args.debug:
-        log.log('steps={}, val_epe={}'.format(steps, val_epe))
-        # network.save_params(os.path.join(repoRoot, 'weights', '{}.params'.format(steps)))        
-        break
