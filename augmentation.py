@@ -26,7 +26,7 @@ class ColorAugmentation(nn.HybridBlock):
         return ret
 
 class GeometryAugmentation(nn.HybridBlock):
-    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size):
+    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size, relative=False):
         super().__init__()
         self._angle_range = tuple(map(lambda x : x / 180 * math.pi, angle_range) )
         self._scale_range = zoom_range
@@ -41,6 +41,7 @@ class GeometryAugmentation(nn.HybridBlock):
         self._orig_shape = np.array(orig_shape)
         self._batch_size = batch_size
         self._unit = np.flip(self._target_shape - 1, axis=0).reshape([2,1]) / np.flip(self._orig_shape - 1, axis=0).reshape([1,2])
+        self._relative = relative
         
     def hybrid_forward(self, F, img1, img2, flow):
         '''
@@ -53,25 +54,25 @@ class GeometryAugmentation(nn.HybridBlock):
         translation_y = F.random.uniform(-1, 1, shape=(self._batch_size,)) * pad_y + F.random.uniform(*self._translation_range, shape=(self._batch_size))
         affine_params = [scale * rotation.cos() * self._unit[0, 0], scale * -rotation.sin() * self._unit[1, 0], translation_x,
                          scale * rotation.sin() * self._unit[0, 1], scale * rotation.cos() * self._unit[1, 1],  translation_y] 
-        affine_params = F.stack(*affine_params, axis=1)
-        concat_img = F.concat(img1 / 255.0, img2 / 255.0, flow, dim=1)
-        grid = F.GridGenerator(data=affine_params, transform_type='affine', target_shape=list(self._target_shape))
-        concat_img = F.BilinearSampler(data=concat_img, grid=grid)
+        if not self._relative:
+            affine_params = F.stack(*affine_params, axis=1)
+            concat_img = F.concat(img1 / 255.0, img2 / 255.0, flow, dim=1)
+            grid = F.GridGenerator(data=affine_params, transform_type='affine', target_shape=list(self._target_shape))
+            concat_img = F.BilinearSampler(data=concat_img, grid=grid)
 
-        flow = F.slice_axis(concat_img, axis=1, begin=6, end=8)
+            flow = F.slice_axis(concat_img, axis=1, begin=6, end=8)
 
-        affine_inverse = F.stack(
-            rotation.cos() / scale, 
-            rotation.sin() / scale,
-            -rotation.sin() / scale, 
-            rotation.cos() / scale,
-            axis=1
-        )
-        linv = F.reshape(affine_inverse, [0, 2, 2])
-        flow = F.reshape_like(F.batch_dot(linv, F.reshape(flow, (0, 0, -3))), flow)
-        img1, img2 = F.slice_axis(concat_img, axis=1, begin=0, end=3), F.slice_axis(concat_img, axis=1, begin=3, end=6)
-        return img1, img2, flow
-
+            affine_inverse = F.stack(
+                rotation.cos() / scale, 
+                rotation.sin() / scale,
+                -rotation.sin() / scale, 
+                rotation.cos() / scale,
+                axis=1
+            )
+            linv = F.reshape(affine_inverse, [0, 2, 2])
+            flow = F.reshape_like(F.batch_dot(linv, F.reshape(flow, (0, 0, -3))), flow)
+            img1, img2 = F.slice_axis(concat_img, axis=1, begin=0, end=3), F.slice_axis(concat_img, axis=1, begin=3, end=6)
+            return img1, img2, flow
 
 class GeometryAugmentationCpu:
     def __init__(self, angle_range, zoom_range, translation_range, target_shape):

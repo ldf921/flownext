@@ -86,18 +86,21 @@ if args.checkpoint is not None:
     pipe.network.load_params(args.checkpoint, ctx=pipe.ctx)
 else:
     run_id = logger.FileLog._localtime().strftime('%b%d-%H%M')
-log = logger.FileLog('logs/{}.log'.format(run_id))
-log.log('start=1, train={}, val={}'.format(trainSize, validationSize))
+if args.valid:
+    log = logger.FileLog('logs/{}.val.log'.format(run_id))
+else:
+    log = logger.FileLog('logs/{}.log'.format(run_id))
+    log.log('start=1, train={}, val={}'.format(trainSize, validationSize))
 
 if args.valid:
     val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
-    log.log('chairs.val:epe={}'.format(val_epe))
+    log.log('steps={}, chairs.val:epe={}'.format(steps, val_epe))
     
     sintel_dataset = sintel.list_data(sintel.sintel_path)
     for k, dataset in sintel_dataset['training'].items():
         img1, img2, flow = [[sintel.load(p) for p in data] for data in zip(*dataset)]
         val_epe = pipe.validate(img1, img2, flow, batch_size=args.batch)
-        log.log('sintel.training.{}:epe={}'.format(k, val_epe))
+        log.log('steps={}, sintel.training.{}:epe={}'.format(steps, k, val_epe))
 
     log.close()
     sys.exit(0)

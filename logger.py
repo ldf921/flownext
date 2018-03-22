@@ -1,11 +1,15 @@
 import datetime
 import os
+import shutil
+
 
 class FileLog:
     __timezone__ = 8
 
     def __init__(self, path, name=None):
-        self.f = open(path, 'w')
+        if os.path.exists(path):
+            shutil.copy(path, path + '.bak')
+        self.f = open(path, 'a')
 
     @classmethod
     def _localtime(cls):
@@ -17,3 +21,6 @@ class FileLog:
     def log(self, msg, end='\n'):
         self.f.write(self._timestamp() + msg + end)
         self.f.flush()
+
+    def close(self):
+        self.f.close()
