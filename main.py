@@ -7,6 +7,7 @@ import sys
 import time
 from timeit import default_timer
 import numpy as np
+import socket
 
 from reader.chairs import binary_reader, trainval
 from reader import sintel
@@ -14,24 +15,27 @@ import flownet
 import mxnet as mx
 from mxnet import nd, autograd
 
-parser = argparse.ArgumentParser()
+model_parser = argparse.ArgumentParser(add_help=False)
+
+training_parser = argparse.ArgumentParser(add_help=False)
+training_parser.add_argument('--batch', type=int, default=8, help="minibatch size of samples per device")
+training_parser.add_argument('--relative', type=str, default="")
+
+parser = argparse.ArgumentParser(parents=[model_parser, training_parser])
 parser.add_argument('-d', '--device', type=str, default='', help="Specify gpu device(s)")
 parser.add_argument('--debug', action='store_true')
 parser.add_argument('--fake_data', action='store_true')
 parser.add_argument('--short_data', action='store_true')
 parser.add_argument('--valid', action='store_true', help='Do validation')
-parser.add_argument('--net_args', type=str, default='', help='network arguments')
-parser.add_argument('--batch', type=int, default=8, help='size of minibatch')
-parser.add_argument('--round', type=int, default=100000, help='number of minibatches per epoch')
 parser.add_argument('-c', '--checkpoint', type=str, default=None, help='model heckpoint to load')
-parser.add_argument('--relative', type=str, default="")
+parser.add_argument('--tag', type=str, default="")
 args = parser.parse_args()
 
 # repoRoot = os.path.dirname(os.path.realpath(__file__))
 repoRoot = r'\\msralab\ProjectData\ehealth02\v-dinliu\Flow2D'
 
 if args.device == "":
-    ctx = mx.cpu()
+    ctx = [mx.cpu()]
 else:
     ctx = [mx.gpu(gpu_id) for gpu_id in map(int, args.device.split(','))]
 
@@ -82,16 +86,25 @@ import logger
 steps = 0
 if args.checkpoint is not None:
     weight_file = os.path.basename(args.checkpoint)
+    checkpoint = args.checkpoint
+    if checkpoint.startswith('WEIGHTS'):
+        checkpoint = checkpoint.replace('WEIGHTS', os.path.join(repoRoot, 'weights'))
+
     run_id, steps = re.match(r'(.+)_(\d+)\.params', weight_file).groups()
     steps = int(steps)
-    pipe.network.load_params(args.checkpoint, ctx=pipe.ctx)
+    pipe.network.load_params(checkpoint, ctx=pipe.ctx)
+    pipe.trainer.step(100, ignore_stale_grad=True)
+    pipe.trainer.load_states(checkpoint.replace('params', 'states'))
 else:
-    run_id = logger.FileLog._localtime().strftime('%b%d-%H%M')
+    run_id = args.tag + logger.FileLog._localtime().strftime('%b%d-%H%M')
+
 if args.valid:
-    log = logger.FileLog('logs/{}.val.log'.format(run_id))
+    log = logger.FileLog(os.path.join(repoRoot, 'logs', '{}.val.log'.format(run_id)))
 else:
-    log = logger.FileLog('logs/{}.log'.format(run_id))
-    log.log('start=1, train={}, val={}'.format(trainSize, validationSize))
+    log = logger.FileLog(os.path.join(repoRoot, 'logs', '{}.log'.format(run_id)))
+    log.log('start={}, train={}, val={}, host={}'.format(steps, trainSize, validationSize, socket.gethostname()))
+    information = ', '.join(['{}={}'.format(k, repr(args.__dict__[k])) for k in args.__dict__])
+    log.log(information)
 
 if args.valid:
     val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
@@ -116,6 +129,9 @@ if args.relative == "":
 elif args.relative == "M":
     aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
                                             orig_shape=(384, 512), batch_size=batch_size_card, relative_angle=0.25, relative_scale=(0.96, 1 / 0.96))
+elif args.relative == "S":
+    aug = augmentation.GeometryAugmentation(angle_range=(-17, 17), zoom_range=(0.5, 1.11), translation_range=0.1, target_shape=(320, 448),
+                                            orig_shape=(384, 512), batch_size=batch_size_card, relative_angle=0.16, relative_scale=(0.98, 1 / 0.98))
 color_aug = augmentation.ColorAugmentation(contrast_range=(-0.4, 0.8), brightness_sigma=0.2, channel_range=(0.8, 1.4), batch_size=batch_size_card)
 aug.hybridize()
 color_aug.hybridize()
@@ -192,6 +208,8 @@ checkpoints = []
 while True:
     steps += 1
     while steps > lr_scedule[0][0]:
+        if len(lr_scedule) == 1:
+            sys.exit(0)
         lr_scedule = lr_scedule[1:]
         pipe.trainer.set_learning_rate(lr_scedule[0][1])
     batch = []
@@ -216,13 +234,14 @@ while True:
         # print(lens.asscalar())
     if steps % 2500 == 0:
         val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
-        log.log('steps={}, val_epe={}'.format(steps, val_epe))
-        prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
-        pipe.network.save_params(prefix + '.params')
-        pipe.trainer.save_states(prefix + '.states')
-        checkpoints.append(prefix)
-        if len(checkpoints) > 3:
-            prefix = checkpoints[0]
-            checkpoints = checkpoints[1:]
-            remove_queue.put(prefix + '.params')
-            remove_queue.put(prefix + '.states')
+        if steps % 5000 == 0:
+            log.log('steps={}, val_epe={}'.format(steps, val_epe))
+            prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
+            pipe.network.save_params(prefix + '.params')
+            pipe.trainer.save_states(prefix + '.states')
+            checkpoints.append(prefix)
+            if len(checkpoints) > 3:
+                prefix = checkpoints[0]
+                checkpoints = checkpoints[1:]
+                remove_queue.put(prefix + '.params')
+                remove_queue.put(prefix + '.states')

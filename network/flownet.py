@@ -3,7 +3,6 @@ from mxnet.gluon import nn
 from mxnet import nd
 import numpy as np
 
-
 class Downsample(nn.HybridBlock):
     def __init__(self, factor, **kwargs):
         super().__init__(**kwargs)
