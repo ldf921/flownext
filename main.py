@@ -11,7 +11,6 @@ import socket
 
 from reader.chairs import binary_reader, trainval
 from reader import sintel
-import flownet 
 import mxnet as mx
 from mxnet import nd, autograd
 
@@ -29,6 +28,9 @@ parser.add_argument('--short_data', action='store_true')
 parser.add_argument('--valid', action='store_true', help='Do validation')
 parser.add_argument('-c', '--checkpoint', type=str, default=None, help='model heckpoint to load')
 parser.add_argument('--tag', type=str, default="")
+parser.add_argument('-n', '--network', type=str, default=None)
+parser.add_argument('--lr_mult', type=float, default=1.0)
+
 args = parser.parse_args()
 
 # repoRoot = os.path.dirname(os.path.realpath(__file__))
@@ -79,8 +81,9 @@ else:
 
 print('data read, train {} val {}'.format(trainSize, validationSize))
 
-import pipeline
-pipe = pipeline.Pipeline(ctx) 
+# import pipeline
+from network import get_pipeline
+pipe = get_pipeline(args.network, ctx=ctx, lr_mult=args.lr_mult) 
 
 import logger
 steps = 0
@@ -202,16 +205,13 @@ for i in range(2):
     Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)).start()
 
 t2 = None
-lr_scedule = [(300_000, 1e-4), (400_000, 1e-4 / 2), (500_000, 1e-4 / 4), (600_000, 1e-4 / 8)]
-pipe.trainer.set_learning_rate(lr_scedule[0][1])
+# lr_scedule = [(300_000, 1e-4), (400_000, 1e-4 / 2), (500_000, 1e-4 / 4), (600_000, 1e-4 / 8)]
+# pipe.trainer.set_learning_rate(lr_scedule[0][1])
 checkpoints = []
 while True:
     steps += 1
-    while steps > lr_scedule[0][0]:
-        if len(lr_scedule) == 1:
-            sys.exit(0)
-        lr_scedule = lr_scedule[1:]
-        pipe.trainer.set_learning_rate(lr_scedule[0][1])
+    if not pipe.set_learning_rate(steps):
+        sys.exit(1)
     batch = []
     t0 = default_timer()
     if t2:

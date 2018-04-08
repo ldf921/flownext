@@ -133,6 +133,15 @@ def multiscale_epe(flow, predictions):
     losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, weights, scales)]
     return F.add_n(*losses)
 
+class MultiscaleEpe(nn.HybridBlock):
+    def __init__(self, scales, weights, **kwargs):
+        self.scales = scales
+        self.weights = weights
+        super().__init__(**kwargs)
+
+    def hybrid_forward(self, F, flow, *predictions):
+        losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, self.weights, self.scales)]
+        return F.add_n(*losses)
 
 if __name__ == '__main__':
 
