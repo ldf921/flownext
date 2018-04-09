@@ -26,6 +26,14 @@ class PipelineBase:
         '''
         pass
 
+    def save(self, prefix):
+        ''' Saving the state of the pipeline
+        Arguments:
+            prefix : the file name prefix for the saved file
+        '''
+        self.network.collect_params().save(prefix + '.params')
+        self.trainer.save_states(prefix + '.states')
+
     def set_learning_rate(self, steps):
         i = 0
         while i < len(self.lr_schedule) and steps > self.lr_schedule[i][0]:
