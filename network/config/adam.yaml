@@ -1,0 +1,9 @@
+optimizer:
+  learning_rate:
+    - [200000.0, 1.0e-4]
+    - [300000.0, 5.0e-5]
+    - [400000.0, 2.5e-5]
+  lr_mult:
+    1.0
+  type:
+    adam

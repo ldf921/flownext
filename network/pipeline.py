@@ -62,6 +62,11 @@ class PipelineBase:
                 epes.append(epe)
         for loss in losses:
             loss.backward()
+        # print(losses[0].asnumpy())
+        # for k, v in self.network.collect_params().items():
+        #     grad = v.grad(ctx=self.ctx[0])
+        #     std = nd.sqrt(nd.mean(nd.square(grad)))
+        #     print(k, std.asscalar())
         epe = nd.mean(epe)
         self.trainer.step(batch_size, ignore_stale_grad=True)
         return epe

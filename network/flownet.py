@@ -4,9 +4,10 @@ from mxnet import nd
 import numpy as np
 
 class Downsample(nn.HybridBlock):
-    def __init__(self, factor, **kwargs):
+    def __init__(self, factor, channels=2, **kwargs):
         super().__init__(**kwargs)
         self.factor = factor
+        self.channels = channels
 
     @staticmethod
     def _kernel2d(F, w):
@@ -17,22 +18,17 @@ class Downsample(nn.HybridBlock):
     def hybrid_forward(self, F, img):
         batch_img = F.expand_dims(F.reshape(img, [-3, -2]), axis=1)
         factor=self.factor
-        kernel = self._kernel2d(F, factor-1)
-        nom = F.Convolution(data=F.ones_like(batch_img), 
-                            weight=kernel, 
-                            no_bias=True, 
-                            kernel=(factor*2-1, factor*2-1),
-                            stride=(factor, factor),
-                            pad=(factor-1, factor-1), 
-                            num_filter=1)
-        img = F.Convolution(data=batch_img, 
-                            weight=kernel, 
-                            no_bias=True, 
-                            kernel=(factor*2-1, factor*2-1),
-                            stride=(factor, factor),
-                            pad=(factor-1, factor-1), 
-                            num_filter=1)
-        return F.broadcast_div(F.reshape(img, [-4, -1, 2, -3, -2]), F.reshape(nom, [-4, -1, 2, -3, -2]))
+        kernel = self._kernel2d(F, factor // 2)
+        conv_args = dict(
+            weight=kernel, 
+            no_bias=True, 
+            kernel=(factor + 1,) * 2,
+            stride=(factor,) * 2,
+            pad=(factor // 2,) * 2,
+            num_filter=1)
+        nom = F.Convolution(data=F.ones_like(batch_img), **conv_args)
+        img = F.Convolution(data=batch_img, **conv_args)
+        return F.broadcast_div(F.reshape(img, [-4, -1, self.channels, -3, -2]), F.reshape(nom, [-4, -1, self.channels, -3, -2]))
 
 class Bilinear(mx.initializer.Initializer):
     def _init_weight(self, _, arr):
@@ -53,7 +49,7 @@ class Upsample(nn.HybridBlock):
 
     def hybrid_forward(self, F, img):
         img = F.pad(img, mode='edge', pad_width=(0, 0, 0, 0, 0, 1, 0, 1))
-        return self.upsamp(img)[:, :, :-1, :-1]
+        return F.slice(self.upsamp(img), begin=(None, None, None, None), end=(None, None, -1, -1))
 
 class Flownet(nn.HybridBlock):
     def __init__(self, **kwargs):
@@ -134,13 +130,27 @@ def multiscale_epe(flow, predictions):
     return F.add_n(*losses)
 
 class MultiscaleEpe(nn.HybridBlock):
-    def __init__(self, scales, weights, **kwargs):
-        self.scales = scales
-        self.weights = weights
+    def __init__(self, scales, weights, match, **kwargs):
         super().__init__(**kwargs)
 
+        self.scales = scales
+        self.weights = weights
+        self.match = match
+        if match == 'upsampling':
+            with self.name_scope():
+                for s in self.scales:
+                    setattr(self, 'upsampler_{}'.format(s), Upsample(2, s))
+
+    def _get_upsampler(self, s):
+        return getattr(self, 'upsampler_{}'.format(s))
+
     def hybrid_forward(self, F, flow, *predictions):
-        losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, self.weights, self.scales)]
+        if self.match == 'upsampling':
+            losses = [EpeLoss()(self._get_upsampler(s)(p), (flow)) * w for p, w, s in zip(predictions, self.weights, self.scales)]
+        elif self.match == 'downsampling':
+            losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, self.weights, self.scales)]
+        else:
+            raise NotImplementedError
         return F.add_n(*losses)
 
 if __name__ == '__main__':

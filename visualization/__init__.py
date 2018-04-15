@@ -6,18 +6,26 @@ import numpy as np
 import math
 
 
-def convert(img, max_motion=20):
-    # ret = np.empty([img.shape[0], img.shape[1], 3], dtype=np.float64)
-    # for i in range(img.shape[0]):
-    #     for j in range(img.shape[1]):
-    #         x, y = -img[i, j, 0], -img[i, j, 1]
-    #         degree = (math.atan2(y, x) / math.pi + 1) / 2
-    #         mag = min(1, ((x ** 2 + y ** 2) ** 0.5) / max_motion)
-    #         ret[i, j] = [degree, mag, 1]
-    deg = (np.arctan2(-img[:, :, 1], -img[:, :, 0]) / math.pi + 1) / 2
-    mag = np.minimum(1, np.linalg.norm(img, axis=-1) / max_motion)
-    ret = np.stack([deg, mag, np.ones_like(deg)], axis=2)
-    return (skimage.color.hsv2rgb(ret) * 255.0).astype(np.uint8)
+def flow2rgb(flow, norm='constant', value=20):
+    '''
+    Arguments:
+        flow : the optical flow image [H, W, 2]
+        norm : normalization method should be "constant" or "max"
+        value : the value used for normalization 
+    '''
+    angle = (np.arctan2(-flow[:, :, 1], -flow[:, :, 0]) / np.pi + 1) / 2
+    mag = np.linalg.norm(flow, axis=-1)
+    if norm == 'max':
+        mag = mag / np.max(mag)
+    elif norm == 'constant':
+        mag = np.minimum(1, mag / value)
+    else:
+        raise NotImplementedError
+    ret = np.empty(mag.shape + (3,), dtype='float32')
+    ret[:, :, 0] = angle
+    ret[:, :, 1] = mag
+    ret[:, :, 2] = 1
+    return skimage.color.hsv2rgb(ret)    
 
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 12))

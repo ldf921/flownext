@@ -95,35 +95,192 @@ class HybridNet(nn.HybridBlock):
         return preds
 
 
-class Pipeline(PipelineBase):
-    def __init__(self, ctx, lr_mult):
+class HybridNetCoarse(nn.HybridBlock):
+    '''
+    Comment:
+        Resnet50 Feature Dims [4, 256] [7, 2048]
+    '''
+    def __init__(self, features, config, **kwargs):
+        super().__init__(**kwargs)
+        self.feature_layers = [4, 5, 6, 7]
+        self.feature_dims = [64, 128, 256, 512]
+        self.features = features
+        with self.name_scope():
+            # self.backbone = vision.resnet50_v1()
+            self.reduce_dim = nn.HybridSequential()
+            self.reduce_dim.add(nn.Conv2D(64, 1))
+            self.reduce_dim.add(nn.BatchNorm()) 
+            self.reduce_dim.add(nn.Activation('relu')) 
+
+            self.flow = nn.HybridSequential(prefix='flow')
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(32, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(16, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(2, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+        
+    def hybrid_forward(self, F, img1, img2):
+        features1 = get_features(self.features, img1, self.feature_layers)
+        features2 = get_features(self.features, img2, self.feature_layers)
+        concat_feature = F.concat(self.reduce_dim(features1[-1]), self.reduce_dim(features2[-1]), dim=1)
+        
+        flow = self.flow(concat_feature)
+        return flow,
+
+
+class Spynet(nn.HybridBlock):
+    ''' Implementation of SpyNet block https://arxiv.org/pdf/1611.00850.pdf
+    Comment:
+    L1(/16), L2(/8), L3(/4), L2(/2), L5(/1)
+    '''
+    def __init__(self, features, config, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.flow = nn.HybridSequential(prefix='flow')
+
+            act_param = get_param(config, 'network.activation', dict())
+            act_func = self._builder(lambda : nn.Activation('relu'), **act_param)
+
+            weight_init_param = get_param(config, 'network.weight_init', dict())
+            weight_init_func = self._builder(lambda : Xavier(rnd_type='gaussian', magnitude=2), **weight_init_param)
+
+            self.flow.add(nn.Conv2D(32, 7, padding=3,
+                weight_initializer=weight_init_func()))
+            self.flow.add(act_func())
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=weight_init_func()))
+            self.flow.add(act_func())
+            self.flow.add(nn.Conv2D(32, 7, padding=3,
+                weight_initializer=weight_init_func()))
+            self.flow.add(act_func())
+            self.flow.add(nn.Conv2D(16, 7, padding=3,
+                weight_initializer=weight_init_func()))
+            self.flow.add(act_func())
+            self.flow.add(nn.Conv2D(2, 7, padding=3,
+                weight_initializer=weight_init_func()))
+        
+    def hybrid_forward(self, F, img1, img2):
+        concat_feature = F.concat(Downsample(32, channels=3)(img1), Downsample(32, channels=3)(img2), dim=1)
+        # print(concat_feature.shape)
+        flow = self.flow(concat_feature)
+        return flow,
+
+    @staticmethod
+    def _builder(default=None, typename=None, args=[], kwargs={}):
+        if typename is None:
+            return default
+        else:
+            init = eval(typename)
+            return lambda : init(*args, **kwargs)
+
+
+def get_param(config, key, default=None):
+    for k in key.split('.'):
+        if k not in config:
+            print('Default {} to {}'.format(key, default))
+            return default
+        config = config[k]
+    return config
+
+
+# class Pipeline(PipelineBase):
+#     def __init__(self, ctx, config, lr_mult=None):
+#         lr_mult = config['optimizer']['lr_mult']
+#         lr_schedule = config['optimizer']['learning_rate']
+#         lr_schedule = [(s, lr * lr_mult) for s, lr in lr_schedule]
+
+#         model = vision.resnet50_v1(root=r'\\msralab\ProjectData\ScratchSSD\Users\v-dinliu\.mxnet\models', pretrained=True, ctx=ctx)
+#         # network.backbone.load_params(model_store.get_model_file('resnet50_v1', 
+#         #     root=r'\\msralab\ProjectData\ScratchSSD\Users\v-dinliu\.mxnet\models'), ctx=ctx)
+#         network = HybridNet(model.features)
+#         network.hybridize()
+#         for k, v in network.collect_params().items():
+#             if k.startswith(network.prefix):
+#                 v.initialize(ctx=ctx)
+#         for k, v in config['optimizer'].get('lr_mult_layer', dict()):
+#             for _, param in getattr(network, k).collect_params().items():
+#                 param.lr_mult = v
+        
+#         trainer = gluon.trainer.Trainer(network.collect_params(), 'sgd', {'learning_rate' : 1e-3, 'momentum' : 0.9, 'wd' : 2e-4})
+        
+#         super().__init__(network, trainer, lr_schedule, ctx)
+
+#         self.color_mean =nd.reshape(nd.array([0.485, 0.456, 0.406]), [1, 3, 1, 1])
+#         self.color_std = nd.reshape(nd.array([0.229, 0.224, 0.225]), [1, 3, 1, 1])
+#         self.epeloss = EpeLoss()
+#         self.epeloss.hybridize()
+#         self.upsampler = Upsample(2, 4)
+#         self.upsampler.collect_params().initialize(ctx=ctx)
+#         self.scale = get_param(config, 'network.scale', 20)
+
+#         self.msloss = MultiscaleEpe([32, 16, 8, 4], [0.1, 0.1, 0.2, 0.4])
+#         self.msloss.hybridize()
+
+#     def loss(self, pred, label):
+#         return self.msloss(label / self.scale, *pred)
+
+#     def metrics(self, pred, label):
+#         shape = label.shape
+#         epe = self.epeloss(nd.slice(self.upsampler(pred[-1]), 
+#             begin=(None, None, 0, 0), 
+#             end=(None, None, shape[2], shape[3])) * self.scale, label)
+#         return epe
+        
+#     def preprocess(self, img):
+#         return nd.broadcast_div(nd.broadcast_minus(img, self.color_mean.as_in_context(img.context)),
+#             self.color_std.as_in_context(img.context))
+
+
+class PipelineCoarse(PipelineBase):
+    def __init__(self, ctx, config, lr_mult=None):
+        lr_mult = config['optimizer']['lr_mult']
+        lr_schedule = config['optimizer']['learning_rate']
+        lr_schedule = [(s, lr * lr_mult) for s, lr in lr_schedule]
+        optimizer_type = config['optimizer'].get('type', 'sgd')
+        optimizer_params = {'learning_rate' : 1e-3, 'wd' : 2e-4}
+        if optimizer_type == 'sgd':
+            optimizer_params['momentum'] = 0.9
+        optimizer_params.update(config['optimizer'].get('params', dict()))
+
         model = vision.resnet50_v1(root=r'\\msralab\ProjectData\ScratchSSD\Users\v-dinliu\.mxnet\models', pretrained=True, ctx=ctx)
-        # network.backbone.load_params(model_store.get_model_file('resnet50_v1', 
-        #     root=r'\\msralab\ProjectData\ScratchSSD\Users\v-dinliu\.mxnet\models'), ctx=ctx)
-        network = HybridNet(model.features)
+        
+        # HybridNetCoarse
+        Network = eval(config['network']['class'])
+        scale = get_param(config, 'network.scale', 20)
+        network = Network(model.features, config)
         network.hybridize()
         for k, v in network.collect_params().items():
             if k.startswith(network.prefix):
                 v.initialize(ctx=ctx)
         
-        trainer = gluon.trainer.Trainer(network.collect_params(), 'sgd', {'learning_rate' : 1e-3, 'momentum' : 0.9, 'wd' : 2e-4})
-        lr_schedule = [(200_000, 1e-3), (300_000, 5e-4), (400_000, 1e-4)]
-        lr_schedule = [ (s, lr * lr_mult) for s, lr in lr_schedule ]
+        for k, v in config['optimizer'].get('lr_mult_layer', dict()).items():
+            for _, param in getattr(network, k).collect_params().items():
+                param.lr_mult = v
+        
+        trainer = gluon.trainer.Trainer(network.collect_params(), optimizer_type, optimizer_params)
+        
         super().__init__(network, trainer, lr_schedule, ctx)
-
-        self.color_mean =nd.reshape(nd.array([0.485, 0.456, 0.406]), [1, 3, 1, 1])
-        self.color_std = nd.reshape(nd.array([0.229, 0.224, 0.225]), [1, 3, 1, 1])
         self.epeloss = EpeLoss()
         self.epeloss.hybridize()
-        self.upsampler = Upsample(2, 4)
+        self.color_mean =nd.reshape(nd.array([0.485, 0.456, 0.406]), [1, 3, 1, 1])
+        self.color_std = nd.reshape(nd.array([0.229, 0.224, 0.225]), [1, 3, 1, 1])
+        self.upsampler = Upsample(2, 32)
         self.upsampler.collect_params().initialize(ctx=ctx)
-        self.scale = 20
+        self.scale = scale
 
-        self.msloss = MultiscaleEpe([32, 16, 8, 4], [0.1, 0.1, 0.2, 0.4])
+        self.msloss = MultiscaleEpe([32], [1], match=get_param(config, 'loss.match', 'downsampling'))
         self.msloss.hybridize()
+        self.msloss.collect_params().initialize(ctx=self.ctx)
+
 
     def loss(self, pred, label):
-        return self.msloss(label, *pred)
+        return self.msloss(label / self.scale, *pred)
 
     def metrics(self, pred, label):
         shape = label.shape
@@ -133,5 +290,6 @@ class Pipeline(PipelineBase):
         return epe
         
     def preprocess(self, img):
+        #pylint: disable=E1101
         return nd.broadcast_div(nd.broadcast_minus(img, self.color_mean.as_in_context(img.context)),
             self.color_std.as_in_context(img.context))

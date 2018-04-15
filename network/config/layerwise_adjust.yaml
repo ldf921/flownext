@@ -1,0 +1,10 @@
+optimizer:
+  learning_rate:
+    - [200000.0, 1.0e-3]
+    - [300000.0, 5.0e-4]
+    - [400000.0, 1.0e-4]
+  lr_mult:
+    0.02
+  lr_mult_layer:
+    flow:
+      0.1

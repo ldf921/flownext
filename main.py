@@ -13,6 +13,8 @@ from reader.chairs import binary_reader, trainval
 from reader import sintel
 import mxnet as mx
 from mxnet import nd, autograd
+import hashlib
+import yaml
 
 model_parser = argparse.ArgumentParser(add_help=False)
 
@@ -21,6 +23,8 @@ training_parser.add_argument('--batch', type=int, default=8, help="minibatch siz
 training_parser.add_argument('--relative', type=str, default="")
 
 parser = argparse.ArgumentParser(parents=[model_parser, training_parser])
+
+parser.add_argument('config', type=str)
 parser.add_argument('-d', '--device', type=str, default='', help="Specify gpu device(s)")
 parser.add_argument('--debug', action='store_true')
 parser.add_argument('--fake_data', action='store_true')
@@ -83,7 +87,10 @@ print('data read, train {} val {}'.format(trainSize, validationSize))
 
 # import pipeline
 from network import get_pipeline
-pipe = get_pipeline(args.network, ctx=ctx, lr_mult=args.lr_mult) 
+if args.config is not None:
+    with open(os.path.join(repoRoot, 'network', 'config', args.config)) as f:
+        config = yaml.load(f)
+pipe = get_pipeline(args.network, ctx=ctx, lr_mult=args.lr_mult, config=config) 
 
 import logger
 steps = 0
@@ -99,6 +106,9 @@ if args.checkpoint is not None:
     pipe.trainer.step(100, ignore_stale_grad=True)
     pipe.trainer.load_states(checkpoint.replace('params', 'states'))
 else:
+    uid = (socket.gethostname() + logger.FileLog._localtime().strftime('%b%d-%H%M') + args.device)
+    if args.tag == "":
+        args.tag = hashlib.sha224(uid.encode()).hexdigest()[:3] 
     run_id = args.tag + logger.FileLog._localtime().strftime('%b%d-%H%M')
 
 if args.valid:
@@ -232,13 +242,17 @@ while True:
         # vecs = nd.reshape(nd.transpose(pred[-1], (0, 2, 3, 1)), (-1, 2))
         # lens = nd.mean(nd.sum(nd.abs(vecs), axis=-1))
         # print(lens.asscalar())
+
+    if steps == 1 and args.short_data:
+        prefix = os.path.join(repoRoot, 'weights', 'test_saver')
+        pipe.save(prefix)
+
     if steps % 2500 == 0:
         val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
+        log.log('steps={}, val_epe={}'.format(steps, val_epe))
         if steps % 5000 == 0:
-            log.log('steps={}, val_epe={}'.format(steps, val_epe))
             prefix = os.path.join(repoRoot, 'weights', '{}_{}'.format(run_id, steps))
-            pipe.network.save_params(prefix + '.params')
-            pipe.trainer.save_states(prefix + '.states')
+            pipe.save(prefix)
             checkpoints.append(prefix)
             if len(checkpoints) > 3:
                 prefix = checkpoints[0]
