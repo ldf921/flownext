@@ -207,12 +207,17 @@ data_queue = Queue(maxsize=100)
 aug_queue = Queue(maxsize=100)
 batch_queue = Queue(maxsize=4)
 remove_queue = Queue(maxsize=50)
-Thread(target=iterate_data, args=(data_queue, train_gen)).start()
-Thread(target=remove_file, args=(remove_queue,)).start()
+
+def start_daemon(thread):
+    thread.daemon = True
+    thread.start()
+
+start_daemon(Thread(target=iterate_data, args=(data_queue, train_gen)))
+start_daemon(Thread(target=remove_file, args=(remove_queue,)))
 for i in range(16):
-    Thread(target=random_aug, args=(data_queue, aug_queue)).start()
+    start_daemon(Thread(target=random_aug, args=(data_queue, aug_queue)))
 for i in range(2):
-    Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)).start()
+    start_daemon(Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)))
 
 t2 = None
 # lr_scedule = [(300_000, 1e-4), (400_000, 1e-4 / 2), (500_000, 1e-4 / 4), (600_000, 1e-4 / 8)]
@@ -221,7 +226,7 @@ checkpoints = []
 while True:
     steps += 1
     if not pipe.set_learning_rate(steps):
-        sys.exit(1)
+        sys.exit(0)
     batch = []
     t0 = default_timer()
     if t2:
@@ -243,9 +248,13 @@ while True:
         # lens = nd.mean(nd.sum(nd.abs(vecs), axis=-1))
         # print(lens.asscalar())
 
-    if steps == 1 and args.short_data:
-        prefix = os.path.join(repoRoot, 'weights', 'test_saver')
-        pipe.save(prefix)
+    if args.short_data:
+        if steps == 1:
+            prefix = os.path.join(repoRoot, 'weights', 'test_saver')
+            pipe.save(prefix)
+        if steps >= 20:
+            print('Test finished')
+            sys.exit(0)
 
     if steps % 2500 == 0:
         val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)

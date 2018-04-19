@@ -15,6 +15,7 @@ def get_features(net, input, layers):
         features.append(feature)
     return [features[i] for i in layers]
 
+
 class FlowPrediction(nn.HybridBlock):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -141,6 +142,8 @@ class Spynet(nn.HybridBlock):
     '''
     def __init__(self, features, config, **kwargs):
         super().__init__(**kwargs)
+        self.scale = get_param(config, 'network.scale')
+
         with self.name_scope():
             self.flow = nn.HybridSequential(prefix='flow')
 
@@ -166,7 +169,7 @@ class Spynet(nn.HybridBlock):
                 weight_initializer=weight_init_func()))
         
     def hybrid_forward(self, F, img1, img2):
-        concat_feature = F.concat(Downsample(32, channels=3)(img1), Downsample(32, channels=3)(img2), dim=1)
+        concat_feature = F.concat(Downsample(self.scale, channels=3)(img1), Downsample(self.scale, channels=3)(img2), dim=1)
         # print(concat_feature.shape)
         flow = self.flow(concat_feature)
         return flow,
@@ -274,7 +277,9 @@ class PipelineCoarse(PipelineBase):
         self.upsampler.collect_params().initialize(ctx=ctx)
         self.scale = scale
 
-        self.msloss = MultiscaleEpe([32], [1], match=get_param(config, 'loss.match', 'downsampling'))
+        loss_scales = get_param(config, 'loss.scales', [32])
+        loss_weights = get_param(config, 'loss.weights', [1 for _ in loss_scales])
+        self.msloss = MultiscaleEpe(loss_scales, loss_weights, match=get_param(config, 'loss.match', 'downsampling'))
         self.msloss.hybridize()
         self.msloss.collect_params().initialize(ctx=self.ctx)
 
