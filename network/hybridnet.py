@@ -1,4 +1,4 @@
-from .flownet import EpeLoss, Upsample, Downsample, MultiscaleEpe
+from .flownet import EpeLoss, Upsample, Downsample, MultiscaleEpe, Flownet
 from .pipeline import PipelineBase
 
 import mxnet as mx
@@ -135,6 +135,58 @@ class HybridNetCoarse(nn.HybridBlock):
         return flow,
 
 
+class HybridNetS16(nn.HybridBlock):
+    '''
+    Comment:
+        Resnet50 Feature Dims [4, 256] [7, 2048]
+    '''
+    def __init__(self, features, config, **kwargs):
+        super().__init__(**kwargs)
+        self.feature_layers = [4, 5, 6, 7]
+        self.feature_dims = [64, 128, 256, 512]
+        self.features = features
+        self.dilation = get_param(config, 'network.dilation', 1)
+        with self.name_scope():
+            # self.backbone = vision.resnet50_v1()
+            self.reduce_dim = nn.HybridSequential()
+            self.reduce_dim.add(nn.Conv2D(64, 1))
+            self.reduce_dim.add(nn.BatchNorm()) 
+            self.reduce_dim.add(nn.Activation('relu')) 
+
+            self.reduce_dim_2 = nn.HybridSequential()
+            self.reduce_dim_2.add(nn.Conv2D(64, 1))
+            self.reduce_dim_2.add(nn.BatchNorm()) 
+
+            self.upsampler = Upsample(64, 2)
+
+            self.flow = nn.HybridSequential(prefix='flow')
+            self.flow.add(nn.Conv2D(64, 7, padding=3 * self.dilation, dilation=self.dilation,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(32, 7, padding=3 * self.dilation, dilation=self.dilation,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(16, 7, padding=3 * self.dilation, dilation=self.dilation,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(2, 7, padding=3 * self.dilation, dilation=self.dilation,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+
+    def _top_down_features(self, F, features):    
+        net = self.reduce_dim(features[-1])
+        net = self.upsampler(net) 
+        net = F.Activation(net + self.reduce_dim_2(features[-2]), 'relu')
+        return net
+
+    def hybrid_forward(self, F, img1, img2):
+        features1 = get_features(self.features, img1, self.feature_layers)
+        features2 = get_features(self.features, img2, self.feature_layers)
+
+        concat_feature = F.concat(self._top_down_features(F, features1), self._top_down_features(F, features2), dim=1)
+      
+        flow = self.flow(concat_feature)
+        return flow,
+
 class Spynet(nn.HybridBlock):
     ''' Implementation of SpyNet block https://arxiv.org/pdf/1611.00850.pdf
     Comment:
@@ -264,7 +316,7 @@ class PipelineCoarse(PipelineBase):
         
         for k, v in config['optimizer'].get('lr_mult_layer', dict()).items():
             for _, param in getattr(network, k).collect_params().items():
-                param.lr_mult = v
+                param.lr_mult = param.lr_mult * v
         
         trainer = gluon.trainer.Trainer(network.collect_params(), optimizer_type, optimizer_params)
         

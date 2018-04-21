@@ -1,0 +1,29 @@
+optimizer:
+  learning_rate:
+    - [100000.0, 5.0e-4]
+    - [300000.0, 1.0e-4]
+    - [400000.0, 5.0e-5]
+  params:
+    wd:
+      2.0e-4
+  lr_mult:
+    1
+  lr_mult_layer:
+    features:
+      0.2 # Learning rate of 1e-4
+  type:
+    adam
+
+network:
+  class:
+    HybridNetS16
+  scale:
+    16.0
+  dilation:
+    2
+
+loss:
+  scales:
+    - 16 
+  match:
+    upsampling

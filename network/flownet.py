@@ -2,6 +2,7 @@ import mxnet as mx
 from mxnet.gluon import nn
 from mxnet import nd
 import numpy as np
+from .pipeline import PipelineBase
 
 class Downsample(nn.HybridBlock):
     def __init__(self, factor, channels=2, **kwargs):
@@ -45,7 +46,9 @@ class Upsample(nn.HybridBlock):
     def __init__(self, channels, factor, **kwargs):
         super().__init__(**kwargs)
         with self.name_scope():
-            self.upsamp = nn.Conv2DTranspose(channels, factor * 2 - 1, strides=factor, padding=factor - 1, weight_initializer=Bilinear())
+            self.upsamp = nn.Conv2DTranspose(channels, factor * 2 - 1, strides=factor, padding=factor - 1, use_bias=False, weight_initializer=Bilinear())
+            self.upsamp.weight.lr_mult = 0
+            self.upsamp.weight.wd_mult = 0
 
     def hybrid_forward(self, F, img):
         img = F.pad(img, mode='edge', pad_width=(0, 0, 0, 0, 0, 1, 0, 1))
