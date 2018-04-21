@@ -2,7 +2,6 @@ import mxnet as mx
 from mxnet.gluon import nn
 from mxnet import nd
 import numpy as np
-from .pipeline import PipelineBase
 
 class Downsample(nn.HybridBlock):
     def __init__(self, factor, channels=2, **kwargs):
@@ -55,7 +54,7 @@ class Upsample(nn.HybridBlock):
         return F.slice(self.upsamp(img), begin=(None, None, None, None), end=(None, None, -1, -1))
 
 class Flownet(nn.HybridBlock):
-    def __init__(self, **kwargs):
+    def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
         with self.name_scope():
             self.conv1   = nn.Conv2D(64, 7, strides=2, padding=3, prefix='conv1')

@@ -33,7 +33,6 @@ parser.add_argument('--valid', action='store_true', help='Do validation')
 parser.add_argument('-c', '--checkpoint', type=str, default=None, help='model heckpoint to load')
 parser.add_argument('--tag', type=str, default="")
 parser.add_argument('-n', '--network', type=str, default=None)
-parser.add_argument('--lr_mult', type=float, default=1.0)
 
 args = parser.parse_args()
 
@@ -90,7 +89,9 @@ from network import get_pipeline
 if args.config is not None:
     with open(os.path.join(repoRoot, 'network', 'config', args.config)) as f:
         config = yaml.load(f)
-pipe = get_pipeline(args.network, ctx=ctx, lr_mult=args.lr_mult, config=config) 
+else:
+    config = dict()
+pipe = get_pipeline(args.network, ctx=ctx, config=config)
 
 import logger
 steps = 0
@@ -120,9 +121,12 @@ else:
     log.log(information)
 
 if args.valid:
-    val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
-    log.log('steps={}, chairs.val:epe={}'.format(steps, val_epe))
-    
+    # val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
+    # log.log('steps={}, chairs.val:epe={}'.format(steps, val_epe))
+    val_epe = pipe.validate_levels(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
+    print(val_epe)
+    log.close()
+    sys.exit(0)
     sintel_dataset = sintel.list_data(sintel.sintel_path)
     for k, dataset in sintel_dataset['training'].items():
         img1, img2, flow = [[sintel.load(p) for p in data] for data in zip(*dataset)]
@@ -220,8 +224,6 @@ for i in range(2):
     start_daemon(Thread(target=batch_samples, args=(aug_queue, batch_queue, batch_size)))
 
 t2 = None
-# lr_scedule = [(300_000, 1e-4), (400_000, 1e-4 / 2), (500_000, 1e-4 / 4), (600_000, 1e-4 / 8)]
-# pipe.trainer.set_learning_rate(lr_scedule[0][1])
 checkpoints = []
 while True:
     steps += 1
