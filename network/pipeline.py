@@ -2,8 +2,8 @@ import mxnet as mx
 import numpy as np
 from mxnet import nd, gluon, autograd
 
-from .flownet import EpeLoss, Upsample, Flownet, multiscale_epe, Downsample
-
+from .flownet import EpeLoss, Upsample, Flownet, MultiscaleEpe, Downsample
+from .config import Reader
 
 class PipelineBase:
     def __init__(self, network, trainer, lr_schedule, ctx):
@@ -104,6 +104,7 @@ class PipelineBase:
 
 class PipelineFlownet:
     def __init__(self, ctx, config):
+        config = Reader(config)
         self.ctx = ctx
         self.network = Flownet(config=config)
         self.network.hybridize()
@@ -117,6 +118,32 @@ class PipelineFlownet:
 
         self.epeloss = EpeLoss()
         self.epeloss.hybridize()
+        self.multiscale_epe = MultiscaleEpe(scales=self.network.strides, weights=[.01, .01, .01, .02, .04], match='downsampling')
+        self.multiscale_epe.hybridize()
+
+        self.lr_schedule = config.optimizer.learning_rate.value
+
+    def save(self, prefix):
+        ''' Saving the state of the pipeline
+        Arguments:
+            prefix : the file name prefix for the saved file
+        '''
+        self.network.save_params(prefix + '.params')
+        self.trainer.save_states(prefix + '.states')
+
+    def set_learning_rate(self, steps):
+        i = 0
+        while i < len(self.lr_schedule) and steps > self.lr_schedule[i][0]:
+            i += 1
+        try:
+            lr = self.lr_schedule[i][1]
+        except IndexError:
+            return False
+        self.trainer.set_learning_rate(lr)
+        return True    
+
+    def loss(self, pred, label):
+        return self.multiscale_epe(label / self.scale, *pred)
 
     def train_batch(self, img1, img2, flow, aug, geo_aug):
         losses = []
@@ -129,7 +156,7 @@ class PipelineFlownet:
                 img1s, img2s = aug(img1s, img2s)
                 rgb_mean = self.rgb_mean.as_in_context(img1s.context)
                 pred = self.network(img1s - rgb_mean, img2s - rgb_mean)
-                loss = multiscale_epe(flows / self.scale, pred)
+                loss = self.loss(pred, flows)
                 epe = nd.mean(self.epeloss(pred[-1] * self.scale, Downsample(4)(flows)))
 
                 losses.append(loss)

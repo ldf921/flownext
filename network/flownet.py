@@ -65,8 +65,17 @@ class Flownet(nn.HybridBlock):
             self.conv4_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv4_1')
             self.conv5   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5')
             self.conv5_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1')
-            self.conv6   = nn.Conv2D(1024, 3, strides=2, padding=1, prefix='conv6')
-            self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=1, prefix='conv6_1')
+
+            dilation = config.network.conv6.dilation.get(1)
+            if dilation == 1:
+                self.conv6   = nn.Conv2D(1024, 3, strides=2, padding=1, prefix='conv6')
+                self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=1, prefix='conv6_1')
+                self.strides = [64, 32, 16, 8, 4]
+            else:
+                self.conv6   = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6')
+                self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_1')
+                self.strides = [32, 32, 16, 8, 4]
+                print(self.strides)
 
             self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
             self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
@@ -74,12 +83,17 @@ class Flownet(nn.HybridBlock):
             self.pred3   = nn.Conv2D(2, 3, padding=1, prefix='pred3')
             self.pred2   = nn.Conv2D(2, 3, padding=1, prefix='pred2')
 
-            self.upsamp5 = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp5')
+            if self.strides[0] == self.strides[1]:
+                self.upsamp5 = nn.Conv2D(2, 3, strides=1, padding=1, prefix='upsamp5')
+                self.deconv5 = nn.Conv2D(512, 3, strides=1, padding=1,  prefix='deconv5')
+            else:
+                self.upsamp5 = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp5')
+                self.deconv5 = nn.Conv2DTranspose(512, 4, strides=2, padding=1,  prefix='deconv5')
+
             self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
             self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
             self.upsamp2 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp2')
 
-            self.deconv5 = nn.Conv2DTranspose(512, 4, strides=2, padding=1,  prefix='deconv5')
             self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
             self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
             self.deconv2 = nn.Conv2DTranspose(64,  4, strides=2, padding=1,  prefix='deconv2')
@@ -125,11 +139,11 @@ class EpeLoss(nn.HybridBlock):
         return F.mean(loss, axis=0, exclude=True)
 
 from mxnet import nd as F
-def multiscale_epe(flow, predictions):
-    scales = [64, 32, 16, 8, 4]
-    weights = [.01, .01, .01, .02, .04]
-    losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, weights, scales)]
-    return F.add_n(*losses)
+# def multiscale_epe(flow, predictions):
+#     scales = [64, 32, 16, 8, 4]
+#     weights = [.01, .01, .01, .02, .04]
+#     losses = [EpeLoss()(p, Downsample(s)(flow)) * w for p, w, s in zip(predictions, weights, scales)]
+#     return F.add_n(*losses)
 
 class MultiscaleEpe(nn.HybridBlock):
     def __init__(self, scales, weights, match, **kwargs):

@@ -9,6 +9,7 @@ class FileLog:
     def __init__(self, path, name=None):
         if os.path.exists(path):
             shutil.copy(path, path + '.bak')
+        self._path = path
         self.f = open(path, 'a')
 
     @classmethod
