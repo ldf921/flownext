@@ -1,4 +1,4 @@
-from .flownet import EpeLoss, Upsample, Downsample, MultiscaleEpe, Flownet
+from .flownet import EpeLoss, Upsample, Downsample, MultiscaleEpe, Flownet, Bilinear
 from .pipeline import PipelineBase
 
 import mxnet as mx
@@ -186,6 +186,91 @@ class HybridNetS16(nn.HybridBlock):
       
         flow = self.flow(concat_feature)
         return flow,
+
+def conv_bn_relu(channels, kernel_size, strides=1, padding=None):
+    if padding is None:
+        padding = (kernel_size - 1) // 2
+    net = nn.HybridSequential()
+    net.add(nn.Conv2D(channels, kernel_size, strides=strides, padding=padding, use_bias=False))
+    net.add(nn.BatchNorm()) 
+    net.add(nn.Activation('relu'))
+    return net
+
+class HybridNetDecoder(nn.HybridBlock):
+    '''
+    Comment:
+        Resnet50 Feature Dims [4, 256] [7, 2048]
+    '''
+    def __init__(self, features, config, **kwargs):
+        super().__init__(**kwargs)
+        self.feature_layers = [4, 5, 6, 7]
+        self.feature_dims = [64, 128, 256, 512]
+        self.features = features
+        with self.name_scope():
+            # self.backbone = vision.resnet50_v1()
+            self.add_layers('reduce_dim', 
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1)
+            )
+
+            self.add_layers('deconv', 
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)),
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)),
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1))
+            )
+
+            self.add_layers('pred',
+                self._prediction_head(),
+                self._prediction_head(),
+                self._prediction_head(),
+                self._prediction_head()
+            )
+
+            self.flow = nn.HybridSequential(prefix='flow')
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+
+    def _prediction_head(self):
+        net = nn.HybridSequential(prefix='pred')
+        net.add(nn.Conv2D(32, 3, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)))
+        net.add(nn.LeakyReLU(0.1))
+        net.add(nn.Conv2D(2, 3, padding=1))
+        return net
+
+
+    def add_layers(self, name, *layers):
+        for i, l in enumerate(layers):
+            setattr(self, name + '%d' % i, l)
+
+    def get_layer(self, name, index):
+        return getattr(self, name + '%d' % index)
+        
+    def hybrid_forward(self, F, img1, img2):
+        features1 = get_features(self.features, img1, self.feature_layers)
+        features2 = get_features(self.features, img2, self.feature_layers)
+
+        concat_feature = F.concat(self.get_layer('reduce_dim', 3)(features1[3]), self.get_layer('reduce_dim', 3)(features2[3]), dim=1)
+        concat_feature = self.flow(concat_feature)
+        
+        concat_features = [concat_feature]
+
+        for i in reversed(range(3)):
+            conv = self.get_layer('reduce_dim', i)(features1[i])
+            concat_feature = F.LeakyReLU(self.get_layer('deconv', i)(concat_feature), slope=0.1)
+            concat_feature = F.concat(conv, concat_feature, dim = 1)
+            concat_features.append(concat_feature)
+
+        pred = [self.get_layer('pred', 3 - i)(concat_features[i]) for i in range(4)]
+        returdn pred
 
 class Spynet(nn.HybridBlock):
     ''' Implementation of SpyNet block https://arxiv.org/pdf/1611.00850.pdf
