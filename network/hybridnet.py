@@ -196,6 +196,7 @@ def conv_bn_relu(channels, kernel_size, strides=1, padding=None):
     net.add(nn.Activation('relu'))
     return net
 
+
 class HybridNetDecoder(nn.HybridBlock):
     '''
     Comment:
@@ -270,7 +271,7 @@ class HybridNetDecoder(nn.HybridBlock):
             concat_features.append(concat_feature)
 
         pred = [self.get_layer('pred', 3 - i)(concat_features[i]) for i in range(4)]
-        returdn pred
+        return pred
 
 class Spynet(nn.HybridBlock):
     ''' Implementation of SpyNet block https://arxiv.org/pdf/1611.00850.pdf
