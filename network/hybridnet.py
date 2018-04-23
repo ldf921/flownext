@@ -1,5 +1,6 @@
 from .flownet import EpeLoss, Upsample, Downsample, MultiscaleEpe, Flownet, Bilinear
 from .pipeline import PipelineBase
+from .config import Reader
 
 import mxnet as mx
 from mxnet import gluon, nd
@@ -106,6 +107,7 @@ class HybridNetCoarse(nn.HybridBlock):
         self.feature_layers = [4, 5, 6, 7]
         self.feature_dims = [64, 128, 256, 512]
         self.features = features
+        config = Reader(config)
         with self.name_scope():
             # self.backbone = vision.resnet50_v1()
             self.reduce_dim = nn.HybridSequential()
@@ -113,18 +115,13 @@ class HybridNetCoarse(nn.HybridBlock):
             self.reduce_dim.add(nn.BatchNorm()) 
             self.reduce_dim.add(nn.Activation('relu')) 
 
-            self.flow = nn.HybridSequential(prefix='flow')
-            self.flow.add(nn.Conv2D(64, 7, padding=3,
-                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
-            self.flow.add(nn.LeakyReLU(0.1))
-            self.flow.add(nn.Conv2D(32, 7, padding=3,
-                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
-            self.flow.add(nn.LeakyReLU(0.1))
-            self.flow.add(nn.Conv2D(16, 7, padding=3,
-                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
-            self.flow.add(nn.LeakyReLU(0.1))
-            self.flow.add(nn.Conv2D(2, 7, padding=3,
-                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            channels = config.network.flow.channels.get([64, 32, 16, 2])
+            self.flow = nn.HybridSequential(prefix='flow') 
+            for i, c in enumerate(channels):
+                if i != 0:
+                    self.flow.add(nn.LeakyReLU(0.1))
+                self.flow.add(nn.Conv2D(c, 7, padding=3,
+                    weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
         
     def hybrid_forward(self, F, img1, img2):
         features1 = get_features(self.features, img1, self.feature_layers)
@@ -273,6 +270,113 @@ class HybridNetDecoder(nn.HybridBlock):
         pred = [self.get_layer('pred', 3 - i)(concat_features[i]) for i in range(4)]
         return pred
 
+class HybridNetFP(nn.HybridBlock):
+    '''
+    Comment:
+        Resnet50 Feature Dims [4, 256] [7, 2048]
+    '''
+    def __init__(self, features, config, **kwargs):
+        super().__init__(**kwargs)
+        self.feature_layers = [4, 5, 6, 7]
+        self.feature_dims = [64, 128, 256, 512]
+        self.feature_strides = [4, 8, 16, 32]
+        self.features = features
+        config = Reader(config)
+        self.scale = config.network.scale.value
+
+        with self.name_scope():
+            # self.backbone = vision.resnet50_v1()
+            self.add_layers('reduce_dim', 
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1),
+                conv_bn_relu(64, 1)
+            )
+
+            self.add_layers('deconv', 
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)),
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)),
+                nn.Conv2DTranspose(64, 4, strides=2, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1))
+            )
+
+            self.add_layers('pred',
+                self._prediction_head(),
+                self._prediction_head(),
+                self._prediction_head(),
+                self._prediction_head()
+            )
+
+            self.flow = nn.HybridSequential(prefix='flow')
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+            self.flow.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow.add(nn.LeakyReLU(0.1))
+
+            self.flow_1 = nn.HybridSequential(prefix='flow')
+            self.flow_1.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow_1.add(nn.LeakyReLU(0.1))
+            self.flow_1.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+            self.flow_1.add(nn.LeakyReLU(0.1))
+            self.flow_1.add(nn.Conv2D(64, 7, padding=3,
+                weight_initializer=Xavier(rnd_type='gaussian', magnitude=2)))
+
+            self.bilinear_upsample_2x = Upsample(2, 2)
+
+    def _prediction_head(self):
+        net = nn.HybridSequential(prefix='pred')
+        net.add(nn.Conv2D(32, 3, padding=1, weight_initializer=mx.initializer.MSRAPrelu(slope=0.1)))
+        net.add(nn.LeakyReLU(0.1))
+        net.add(nn.Conv2D(2, 3, padding=1))
+        return net
+
+    @staticmethod
+    def _resample(F, img, flow, scale=1):
+        ''' The flow after applying scale is pixel w.r.p to the current feature map resolution
+        '''
+        flow = F.BlockGrad(flow * scale) 
+        grids = F.GridGenerator(flow, 'warp')
+        return F.BilinearSampler(data=img, grid=grids)
+
+    def add_layers(self, name, *layers):
+        for i, l in enumerate(layers):
+            setattr(self, name + '%d' % i, l)
+
+    def get_layer(self, name, index):
+        return getattr(self, name + '%d' % index)
+        
+    def hybrid_forward(self, F, img1, img2):
+        features1 = get_features(self.features, img1, self.feature_layers)
+        features2 = get_features(self.features, img2, self.feature_layers)
+
+        concat_feature = F.concat(self.get_layer('reduce_dim', 3)(features1[3]), self.get_layer('reduce_dim', 3)(features2[3]), dim=1)
+        flow_feature = self.flow(concat_feature)
+        pred = [self.get_layer('pred', 3)(flow_feature)]
+
+        for i in reversed(range(3)):
+            reduce1 = self.get_layer('reduce_dim', i)(features1[i])
+            
+            flow_feature = F.LeakyReLU(self.get_layer('deconv', i)(flow_feature), slope=0.1)
+
+            if i == 1:
+                coarse_flow = self.bilinear_upsample_2x(pred[-1])
+                reduce2 = self.get_layer('reduce_dim', i)(features2[i])
+                warp_reduce2 = self._resample(F, reduce2, coarse_flow, scale=self.scale / self.feature_strides[i])
+                flow_feature = F.LeakyReLU(flow_feature + self.flow_1(F.concat(reduce1, warp_reduce2, dim=1)), slope=0.1)
+                
+            flow_feature = F.concat(reduce1, flow_feature, dim = 1)
+            flow = self.get_layer('pred', i)(flow_feature)
+
+            pred.append(flow)
+
+        return pred
+
 class Spynet(nn.HybridBlock):
     ''' Implementation of SpyNet block https://arxiv.org/pdf/1611.00850.pdf
     Comment:
@@ -392,7 +496,7 @@ class PipelineCoarse(PipelineBase):
         model = vision.resnet50_v1(root=r'\\msralab\ProjectData\ScratchSSD\Users\v-dinliu\.mxnet\models', pretrained=True, ctx=ctx)
         
         # HybridNetCoarse
-        Network = eval(config['network']['class'])
+        Network = eval(config['network']['class'])                     
         scale = get_param(config, 'network.scale', 20)
         network = Network(model.features, config)
         network.hybridize()
