@@ -1,6 +1,5 @@
 optimizer:
   learning_rate:
-    - [5000.0, 5.0e-5]
     - [100000.0, 5.0e-4]
     - [300000.0, 1.0e-4]
     - [400000.0, 5.0e-5]
@@ -17,7 +16,7 @@ optimizer:
 
 network:
   class:
-    HybridNetDecoder
+    HybridNetFP
   scale:
     20.0
 

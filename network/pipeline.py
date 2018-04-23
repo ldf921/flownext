@@ -2,7 +2,7 @@ import mxnet as mx
 import numpy as np
 from mxnet import nd, gluon, autograd
 
-from .flownet import EpeLoss, Upsample, Flownet, MultiscaleEpe, Downsample
+from .flownet import EpeLoss, Upsample, build_network, MultiscaleEpe, Downsample
 from .config import Reader
 
 class PipelineBase:
@@ -106,7 +106,7 @@ class PipelineFlownet:
     def __init__(self, ctx, config):
         config = Reader(config)
         self.ctx = ctx
-        self.network = Flownet(config=config)
+        self.network = build_network(getattr(config.network, 'class').get('Flownet'))(config=config)
         self.network.hybridize()
         self.network.collect_params().initialize(init=mx.initializer.MSRAPrelu(slope=0.1), ctx=self.ctx)
         self.trainer = gluon.Trainer(self.network.collect_params(), 'adam', {'learning_rate': 1e-4})
