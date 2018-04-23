@@ -43,6 +43,11 @@ class Bilinear(mx.initializer.Initializer):
 
 class Upsample(nn.HybridBlock):
     def __init__(self, channels, factor, **kwargs):
+        ''' Upsample a feature map
+        Arguments:
+            channels : channels of the feature map
+            factor : scale to upsample
+        '''
         super().__init__(**kwargs)
         with self.name_scope():
             self.upsamp = nn.Conv2DTranspose(channels, factor * 2 - 1, strides=factor, padding=factor - 1, use_bias=False, weight_initializer=Bilinear())
