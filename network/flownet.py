@@ -68,19 +68,40 @@ class Flownet(nn.HybridBlock):
             self.conv3_1 = nn.Conv2D(256, 3, strides=1, padding=1, prefix='conv3_1')
             self.conv4   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv4')
             self.conv4_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv4_1')
-            self.conv5   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5')
-            self.conv5_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1')
 
             dilation = config.network.conv6.dilation.get(1)
-            if dilation == 1:
-                self.conv6   = nn.Conv2D(1024, 3, strides=2, padding=1, prefix='conv6')
-                self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=1, prefix='conv6_1')
-                self.strides = [64, 32, 16, 8, 4]
-            else:
-                self.conv6   = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6')
-                self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_1')
+            self.impl = config.network.implementation.get('normal')
+            if self.impl == 'normal':
+                self.conv5   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5')
+                self.conv5_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1')
+
+                if dilation == 1:
+                    self.conv6   = nn.Conv2D(1024, 3, strides=2, padding=1, prefix='conv6')
+                    self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=1, prefix='conv6_1')
+                    self.strides = [64, 32, 16, 8, 4]
+                else:
+                    self.conv6   = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6')
+                    self.conv6_1 = nn.Conv2D(1024, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_1')
+                    self.strides = [32, 32, 16, 8, 4]
+                    print(self.strides)
+            elif self.impl == 'dilation':
+                self.conv5_net = nn.HybridSequential()
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5'))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1'))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_2'))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+
+                self.conv6_net = nn.HybridSequential()
+                self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6'))
+                self.conv6_net.add(nn.LeakyReLU(0.1))
+                self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_1'))
+                self.conv6_net.add(nn.LeakyReLU(0.1))
+
                 self.strides = [32, 32, 16, 8, 4]
-                print(self.strides)
+                print('Dilation', self.strides)
+
 
             self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
             self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
@@ -109,8 +130,13 @@ class Flownet(nn.HybridBlock):
         conv2 = nn.LeakyReLU(0.1)(self.conv2(conv1))
         conv3 = nn.LeakyReLU(0.1)(self.conv3_1(nn.LeakyReLU(0.1)(self.conv3(conv2))))
         conv4 = nn.LeakyReLU(0.1)(self.conv4_1(nn.LeakyReLU(0.1)(self.conv4(conv3))))
-        conv5 = nn.LeakyReLU(0.1)(self.conv5_1(nn.LeakyReLU(0.1)(self.conv5(conv4))))
-        conv6 = nn.LeakyReLU(0.1)(self.conv6_1(nn.LeakyReLU(0.1)(self.conv6(conv5))))
+
+        if self.impl == 'normal':
+            conv5 = nn.LeakyReLU(0.1)(self.conv5_1(nn.LeakyReLU(0.1)(self.conv5(conv4))))
+            conv6 = nn.LeakyReLU(0.1)(self.conv6_1(nn.LeakyReLU(0.1)(self.conv6(conv5))))
+        elif self.impl == 'dilation':
+            conv5 = self.conv5_net(conv4)
+            conv6 = self.conv6_net(conv5)
 
         pred6 = self.pred6(conv6)
 
