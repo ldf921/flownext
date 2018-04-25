@@ -24,7 +24,7 @@ training_parser.add_argument('--relative', type=str, default="")
 
 parser = argparse.ArgumentParser(parents=[model_parser, training_parser])
 
-parser.add_argument('config', type=str)
+parser.add_argument('config', type=str, nargs='?', default=None)
 parser.add_argument('-d', '--device', type=str, default='', help="Specify gpu device(s)")
 parser.add_argument('--debug', action='store_true')
 parser.add_argument('--fake_data', action='store_true')
@@ -84,6 +84,27 @@ else:
 
 print('data read, train {} val {}'.format(trainSize, validationSize))
 
+import path
+import logger
+steps = 0
+if args.checkpoint is not None:
+    log_file, run_id = path.find_log(args.checkpoint)    
+    checkpoint, steps = path.find_checkpoints(run_id)[-1]
+    steps = int(steps)
+
+    _, exp_info = path.read_log(log_file)
+    exp_info = exp_info[-1]
+    for k in args.__dict__:
+        if k in exp_info and k not in ('device', 'valid', 'checkpoint'):
+            setattr(args, k, eval(exp_info[k]))
+            print('{}={}, '.format(k, exp_info[k]), end='')
+    print()
+else:
+    uid = (socket.gethostname() + logger.FileLog._localtime().strftime('%b%d-%H%M') + args.device)
+    if args.tag == "":
+        args.tag = hashlib.sha224(uid.encode()).hexdigest()[:3] 
+    run_id = args.tag + logger.FileLog._localtime().strftime('%b%d-%H%M')
+
 # import pipeline
 from network import get_pipeline
 if args.config is not None:
@@ -93,27 +114,16 @@ else:
     config = dict()
 pipe = get_pipeline(args.network, ctx=ctx, config=config)
 
-import logger
-steps = 0
 if args.checkpoint is not None:
-    weight_file = os.path.basename(args.checkpoint)
-    checkpoint = args.checkpoint
-    if checkpoint.startswith('WEIGHTS'):
-        checkpoint = checkpoint.replace('WEIGHTS', os.path.join(repoRoot, 'weights'))
+    print('Load Checkpoint {}'.format(checkpoint))
+    pipe.load(checkpoint)
+    if not args.valid:
+        pipe.trainer.step(100, ignore_stale_grad=True)
+        pipe.trainer.load_states(checkpoint.replace('params', 'states'))
 
-    run_id, steps = re.match(r'(.+)_(\d+)\.params', weight_file).groups()
-    steps = int(steps)
-    pipe.network.load_params(checkpoint, ctx=pipe.ctx)
-    pipe.trainer.step(100, ignore_stale_grad=True)
-    pipe.trainer.load_states(checkpoint.replace('params', 'states'))
-else:
-    uid = (socket.gethostname() + logger.FileLog._localtime().strftime('%b%d-%H%M') + args.device)
-    if args.tag == "":
-        args.tag = hashlib.sha224(uid.encode()).hexdigest()[:3] 
-    run_id = args.tag + logger.FileLog._localtime().strftime('%b%d-%H%M')
 
 if args.valid:
-    log = logger.FileLog(os.path.join(repoRoot, 'logs', '{}.val.log'.format(run_id)))
+    log = logger.FileLog(os.path.join(repoRoot, 'logs', '{}.val.log'.format(run_id)), screen=True)
 else:
     log = logger.FileLog(os.path.join(repoRoot, 'logs', '{}.log'.format(run_id)))
     log.log('start={}, train={}, val={}, host={}'.format(steps, trainSize, validationSize, socket.gethostname()))
@@ -121,12 +131,10 @@ else:
     log.log(information)
 
 if args.valid:
-    # val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
-    # log.log('steps={}, chairs.val:epe={}'.format(steps, val_epe))
+    val_epe = pipe.validate(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
+    log.log('steps={}, chairs.val:epe={}'.format(steps, val_epe))
     val_epe = pipe.validate_levels(validationImg1, validationImg2, validationFlow, batch_size=args.batch*2)
-    print(val_epe)
-    log.close()
-    sys.exit(0)
+    log.log('steps={}, chairs.val:epe_level={}'.format(steps, val_epe))
     sintel_dataset = sintel.list_data(sintel.sintel_path)
     for k, dataset in sintel_dataset['training'].items():
         img1, img2, flow = [[sintel.load(p) for p in data] for data in zip(*dataset)]
@@ -243,7 +251,7 @@ while True:
     loading_time.update(default_timer() - t0)
     epe = pipe.train_batch(img1, img2, flow, color_aug, aug)
     if steps <= 20 or steps % 50 == 0:
-        train_epe.update(epe.asscalar())
+        train_epe.update(epe.asscalar()) #pylint: disable=E1101
         log.log('steps={}, epe={}, loading_time={:.2f}, total_time={:.2f}'.format(steps, train_epe.average, loading_time.average, total_time.average))
         # print('Steps {}, epe {}'.format(steps, epe))
         # vecs = nd.reshape(nd.transpose(pred[-1], (0, 2, 3, 1)), (-1, 2))

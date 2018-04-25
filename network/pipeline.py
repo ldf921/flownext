@@ -36,6 +36,11 @@ class PipelineBase:
         self.network.collect_params().save(prefix + '.params')
         self.trainer.save_states(prefix + '.states')
 
+    def load(self, checkpoint):
+        '''Loading the state of pipeline
+        '''
+        self.network.collect_params().load(checkpoint, ctx=self.ctx)
+
     def set_learning_rate(self, steps):
         i = 0
         while i < len(self.lr_schedule) and steps > self.lr_schedule[i][0]:
@@ -130,6 +135,11 @@ class PipelineFlownet:
         '''
         self.network.save_params(prefix + '.params')
         self.trainer.save_states(prefix + '.states')
+
+    def load(self, checkpoint):
+        '''Loading the state of pipeline
+        '''
+        self.network.load_params(checkpoint, ctx=self.ctx)
 
     def set_learning_rate(self, steps):
         i = 0
