@@ -30,7 +30,9 @@ parser.add_argument('--debug', action='store_true')
 parser.add_argument('--fake_data', action='store_true')
 parser.add_argument('--short_data', action='store_true')
 parser.add_argument('--valid', action='store_true', help='Do validation')
-parser.add_argument('-c', '--checkpoint', type=str, default=None, help='model heckpoint to load')
+parser.add_argument('-c', '--checkpoint', type=str, default=None, 
+    help='model heckpoint to load, by default, the latest model is loaded.'
+    'You can use checkpoint:steps to load to a specific steps')
 parser.add_argument('--tag', type=str, default="")
 parser.add_argument('-n', '--network', type=str, default=None)
 
