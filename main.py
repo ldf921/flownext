@@ -88,8 +88,21 @@ import path
 import logger
 steps = 0
 if args.checkpoint is not None:
-    log_file, run_id = path.find_log(args.checkpoint)    
-    checkpoint, steps = path.find_checkpoints(run_id)[-1]
+    if ':' in args.checkpoint:
+        prefix, steps = args.checkpoint.split(':')
+    else:
+        prefix = args.checkpoint
+        steps = None
+    log_file, run_id = path.find_log(prefix)    
+    if steps is None:
+        checkpoint, steps = path.find_checkpoints(run_id)[-1]
+    else:
+        checkpoints = path.find_checkpoints(run_id)
+        try:
+            checkpoint, steps = next(filter(lambda t : t[1] == steps, checkpoints))
+        except StopIteration:
+            print('The steps not found in checkpoints', steps, checkpoints)
+            raise StopIteration
     steps = int(steps)
 
     _, exp_info = path.read_log(log_file)
