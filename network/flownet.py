@@ -256,7 +256,10 @@ class FlownetEncoder(nn.HybridBlock):
             self.fuse2.add(nn.Conv2D(64, 3, padding=1, prefix='fuse2'))
             self.fuse2.add(nn.LeakyReLU(0.1))
 
-            self.encoder = ConvEncoder()
+            if config.network.encoder.get(True):
+                self.encoder = ConvEncoder()
+            else:
+                self.encoder = None
 
     def hybrid_forward(self, F, img1, img2):
         concat_img = F.concat(img1, img2, dim=1)
@@ -267,7 +270,8 @@ class FlownetEncoder(nn.HybridBlock):
         conv5 = nn.LeakyReLU(0.1)(self.conv5_1(nn.LeakyReLU(0.1)(self.conv5(conv4))))
         conv6 = nn.LeakyReLU(0.1)(self.conv6_1(nn.LeakyReLU(0.1)(self.conv6(conv5))))
 
-        feature1 = self.encoder(img1)
+        if self.encoder is not None:
+            feature1 = self.encoder(img1)
 
         pred6 = self.pred6(conv6)
 
@@ -275,15 +279,21 @@ class FlownetEncoder(nn.HybridBlock):
         pred5 = self.pred5(concat5)
 
         deconv4 = nn.LeakyReLU(0.1)(self.deconv4(concat5))
-        concat4 = F.concat(self.upsamp4(pred5), self.fuse4(F.concat(deconv4, feature1[3], dim=1)), conv4, dim=1)
+        if self.encoder is not None:
+            deconv4 = F.concat(deconv4, feature1[3], dim=1)
+        concat4 = F.concat(self.upsamp4(pred5), self.fuse4(deconv4), conv4, dim=1)
         pred4 = self.pred4(concat4)
 
         deconv3 = nn.LeakyReLU(0.1)(self.deconv3(concat4))
-        concat3 = F.concat(self.upsamp3(pred4), self.fuse3(F.concat(deconv3, feature1[2], dim=1)), conv3, dim=1)
+        if self.encoder is not None:
+            deconv3 = F.concat(deconv3, feature1[2], dim=1)
+        concat3 = F.concat(self.upsamp3(pred4), self.fuse3(deconv3), conv3, dim=1)
         pred3 = self.pred3(concat3)
 
         deconv2 = nn.LeakyReLU(0.1)(self.deconv2(concat3))
-        concat2 = F.concat(self.upsamp2(pred3), self.fuse2(F.concat(deconv2, feature1[1], dim=1)), conv2, dim=1)
+        if self.encoder is not None:
+            deconv2 = F.concat(deconv2, feature1[1], dim=1)
+        concat2 = F.concat(self.upsamp2(pred3), self.fuse2(deconv2), conv2, dim=1)
         pred2 = self.pred2(concat2)
 
         return pred6, pred5, pred4, pred3, pred2
