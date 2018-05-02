@@ -16,11 +16,11 @@ def list_dir(folder, pattern, groups=False):
 
 def find_log(prefix):
     log_dir = os.path.join(repo_root, 'logs')
-    pattern = r'^(%s.*\d)\.log$' % prefix
+    pattern = r'^(%s(.*\d)?)\.log$' % prefix
     rets = list(list_dir(log_dir, pattern, groups=True))
     print(rets)
     if len(rets) > 0 :
-        return rets[0]
+        return rets[0][:2]
     else:
         raise ValueError("Not found {}".format(prefix))
 

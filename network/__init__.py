@@ -1,5 +1,6 @@
-from . import hybridnet
+from . import layer
 from . import flownet
+from . import hybridnet
 from . import pipeline
 
 def get_pipeline(network, **kwargs):

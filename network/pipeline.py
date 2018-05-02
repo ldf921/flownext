@@ -222,7 +222,7 @@ class PipelineFlownet:
     def validate_levels(self, img1, img2, flow, batch_size):
         ''' validate the whole dataset at each sample level
         '''
-        scales = [64, 32, 16, 8, 4]
+        scales = self.network.strides or [64, 32, 16, 8, 4]
         upsamplers = [Upsample(2, scale) for scale in scales]
         for upsampler in upsamplers:
             upsampler.collect_params().initialize(ctx=self.ctx)

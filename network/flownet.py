@@ -1,7 +1,9 @@
 import mxnet as mx
-from mxnet.gluon import nn
-from mxnet import nd
 import numpy as np
+from mxnet import nd as F
+from mxnet.gluon import nn
+
+from . import layer
 
 class Downsample(nn.HybridBlock):
     def __init__(self, factor, channels=2, **kwargs):
@@ -61,6 +63,8 @@ class Upsample(nn.HybridBlock):
 class Flownet(nn.HybridBlock):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
+        self.strides = None
+        
         with self.name_scope():
             self.conv1   = nn.Conv2D(64, 7, strides=2, padding=3, prefix='conv1')
             self.conv2   = nn.Conv2D(128, 5, strides=2, padding=2, prefix='conv2')
@@ -124,6 +128,23 @@ class Flownet(nn.HybridBlock):
             self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
             self.deconv2 = nn.Conv2DTranspose(64,  4, strides=2, padding=1,  prefix='deconv2')
 
+            self.fuse5_impl = config.network.fuse5.implementation.get('none')
+            self.fuse5_basline = config.network.fuse5.basline.get(False)
+            if self.fuse5_impl == 'deformable':
+                if not self.fuse5_basline:
+                    self.fuse5_deform = layer.BrunchDeform(512, 3, num_deformable_group=4, split_channels=(384, 128), prefix='fuse5_0', project=True)
+                else:
+                    net = self.fuse5_deform = nn.HybridSequential()
+                    net.add(nn.Conv2D(512, 1, prefix='fuse5_0r'))
+                    net.add(nn.LeakyReLU(0.1))
+                    net.add(nn.Conv2D(512, 3, padding=1, prefix='fuse5_0'))
+
+                net = self.fuse5 = nn.HybridSequential()
+                net.add(nn.LeakyReLU(0.1))
+                net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='fuse5_1'))
+                net = self.fuse5_project = nn.HybridSequential() 
+                net.add(nn.Conv2D(512, 3, padding=1, prefix='fuse5_project', use_bias=False))
+
     def hybrid_forward(self, F, img1, img2):
         concat_img = F.concat(img1, img2, dim=1)
         conv1 = nn.LeakyReLU(0.1)(self.conv1(concat_img))
@@ -141,6 +162,12 @@ class Flownet(nn.HybridBlock):
         pred6 = self.pred6(conv6)
 
         concat5 = F.concat(self.upsamp5(pred6), nn.LeakyReLU(0.1)(self.deconv5(conv6)), conv5, dim=1)
+        if self.fuse5_impl == 'deformable':
+            if self.fuse5_basline:
+                fuse5_feature = self.fuse5_deform(concat5)
+            else:
+                fuse5_feature = self.fuse5_deform(concat5, concat5)
+            concat5 = F.LeakyReLU(self.fuse5_project(concat5) + self.fuse5(fuse5_feature), slope=0.1)
         pred5 = self.pred5(concat5)
 
         concat4 = F.concat(self.upsamp4(pred5), nn.LeakyReLU(0.1)(self.deconv4(concat5)), conv4, dim=1)
@@ -313,7 +340,6 @@ class EpeLoss(nn.HybridBlock):
         loss = F.sqrt(F.sum(F.square(pred - label), axis=1))
         return F.mean(loss, axis=0, exclude=True)
 
-from mxnet import nd as F
 # def multiscale_epe(flow, predictions):
 #     scales = [64, 32, 16, 8, 4]
 #     weights = [.01, .01, .01, .02, .04]
@@ -355,13 +381,14 @@ def build_network(name):
         raise NotImplementedError
 
 if __name__ == '__main__':
+    pass
 
-    img = nd.arange(16).reshape((1, 1, 4, 4))
-    img = nd.repeat(img, repeats=2, axis=1)
-    upsamp = Upsample(2, 4)
-    upsamp.collect_params().initialize()
-    print(img)
-    print(upsamp(img))    
+    # img = nd.arange(16).reshape((1, 1, 4, 4))
+    # img = nd.repeat(img, repeats=2, axis=1)
+    # upsamp = Upsample(2, 4)
+    # upsamp.collect_params().initialize()
+    # print(img)
+    # print(upsamp(img))    
 
     # flownet = Flownet()
     # img1 = nd.random_uniform(shape=(5, 3, 320, 448))
