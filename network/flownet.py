@@ -60,6 +60,114 @@ class Upsample(nn.HybridBlock):
         img = F.pad(img, mode='edge', pad_width=(0, 0, 0, 0, 0, 1, 0, 1))
         return F.slice(self.upsamp(img), begin=(None, None, None, None), end=(None, None, -1, -1))
 
+class FlownetDilation(nn.HybridBlock):
+    def __init__(self, config, **kwargs):
+        super().__init__(**kwargs)
+        self.strides = None
+        
+        with self.name_scope():
+            self.conv1   = nn.Conv2D(64, 7, strides=2, padding=3, prefix='conv1')
+            self.conv2   = nn.Conv2D(128, 5, strides=2, padding=2, prefix='conv2')
+            self.conv3   = nn.Conv2D(256, 5, strides=2, padding=2, prefix='conv3')
+            self.conv3_1 = nn.Conv2D(256, 3, strides=1, padding=1, prefix='conv3_1')
+            self.conv4   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv4')
+            self.conv4_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv4_1')
+
+            
+            self.impl = config.network.implementation.get('normal')
+            
+            dilation = 1
+
+            dilation_5 = config.network.conv5.dilation.get(False)
+            self.conv5_net = nn.HybridSequential()
+            if dilation_5:
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5'))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+                dilation *= 2
+            else:
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5'))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+            
+            for i in range(1, config.network.conv5.layers.get(2)):
+                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv5_%d' % i))
+                self.conv5_net.add(nn.LeakyReLU(0.1))
+                print('conv5_%d Dilation%d' % (i, dilation))
+
+            dilation_6 = config.network.conv6.dilation.get(False)
+            self.conv6_net = nn.HybridSequential()
+            if dilation_6:
+                self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6'))
+                self.conv6_net.add(nn.LeakyReLU(0.1))
+                dilation *= 2
+            else:
+                assert(not dilation_5)
+                self.conv6_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv6'))
+                self.conv6_net.add(nn.LeakyReLU(0.1))
+
+            for i in range(1, config.network.conv6.layers.get(2)):
+                self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_%d' % i))
+                self.conv6_net.add(nn.LeakyReLU(0.1))
+                print('conv6_%d Dilation%d' % (i, dilation))
+
+            if dilation == 4:
+                self.strides = [16, 16, 16, 8, 4]
+            else:
+                self.strides = [32, 32, 16, 8, 4]
+            print('Strides', self.strides)
+
+            self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
+            self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
+            self.pred4   = nn.Conv2D(2, 3, padding=1, prefix='pred4')
+            self.pred3   = nn.Conv2D(2, 3, padding=1, prefix='pred3')
+            self.pred2   = nn.Conv2D(2, 3, padding=1, prefix='pred2')
+
+            if self.strides[0] == self.strides[1]:
+                dilation = dilation // 2
+                self.upsamp5 = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp5')
+                self.deconv5 = nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation,  prefix='deconv5')
+            else:
+                self.upsamp5 = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp5')
+                self.deconv5 = nn.Conv2DTranspose(512, 4, strides=2, padding=1,  prefix='deconv5')
+
+            if self.strides[1] == self.strides[2]:
+                dilation = dilation // 2
+                self.upsamp4 = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp4')
+                self.deconv4 = nn.Conv2D(256, 3, strides=1, padding=dilation, dilation=dilation, prefix='deconv4')
+            else:
+                self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
+                self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
+
+            self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
+            self.upsamp2 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp2')
+
+            self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
+            self.deconv2 = nn.Conv2DTranspose(64,  4, strides=2, padding=1,  prefix='deconv2')
+
+    def hybrid_forward(self, F, img1, img2):
+        concat_img = F.concat(img1, img2, dim=1)
+        conv1 = nn.LeakyReLU(0.1)(self.conv1(concat_img))
+        conv2 = nn.LeakyReLU(0.1)(self.conv2(conv1))
+        conv3 = nn.LeakyReLU(0.1)(self.conv3_1(nn.LeakyReLU(0.1)(self.conv3(conv2))))
+        conv4 = nn.LeakyReLU(0.1)(self.conv4_1(nn.LeakyReLU(0.1)(self.conv4(conv3))))
+        conv5 = self.conv5_net(conv4)
+        conv6 = self.conv6_net(conv5)
+
+        pred6 = self.pred6(conv6)
+
+        concat5 = F.concat(self.upsamp5(pred6), nn.LeakyReLU(0.1)(self.deconv5(conv6)), conv5, dim=1)
+        pred5 = self.pred5(concat5)
+
+        concat4 = F.concat(self.upsamp4(pred5), nn.LeakyReLU(0.1)(self.deconv4(concat5)), conv4, dim=1)
+        pred4 = self.pred4(concat4)
+
+        concat3 = F.concat(self.upsamp3(pred4), nn.LeakyReLU(0.1)(self.deconv3(concat4)), conv3, dim=1)
+        pred3 = self.pred3(concat3)
+
+        concat2 = F.concat(self.upsamp2(pred3), nn.LeakyReLU(0.1)(self.deconv2(concat3)), conv2, dim=1)
+        pred2 = self.pred2(concat2)
+
+        return pred6, pred5, pred4, pred3, pred2    
+
 class Flownet(nn.HybridBlock):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
@@ -89,13 +197,24 @@ class Flownet(nn.HybridBlock):
                     self.strides = [32, 32, 16, 8, 4]
                     print(self.strides)
             elif self.impl == 'dilation':
-                self.conv5_net = nn.HybridSequential()
-                self.conv5_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5'))
-                self.conv5_net.add(nn.LeakyReLU(0.1))
-                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1'))
-                self.conv5_net.add(nn.LeakyReLU(0.1))
-                self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_2'))
-                self.conv5_net.add(nn.LeakyReLU(0.1))
+                if not config.network.conv5.dilation.get(False):
+                    self.conv5_net = nn.HybridSequential()
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv5'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_1'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5_2'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                else:
+                    assert dilation == 2
+                    self.conv5_net = nn.HybridSequential()
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv5'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv5_1'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                    self.conv5_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv5_2'))
+                    self.conv5_net.add(nn.LeakyReLU(0.1))
+                    dilation = dilation * 2
 
                 self.conv6_net = nn.HybridSequential()
                 self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6'))
@@ -103,7 +222,10 @@ class Flownet(nn.HybridBlock):
                 self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_1'))
                 self.conv6_net.add(nn.LeakyReLU(0.1))
 
-                self.strides = [32, 32, 16, 8, 4]
+                if dilation == 4:
+                    self.strides = [16, 16, 16, 8, 4]
+                else:
+                    self.strides = [32, 32, 16, 8, 4]
                 print('Dilation', self.strides)
 
 
@@ -120,11 +242,16 @@ class Flownet(nn.HybridBlock):
                 self.upsamp5 = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp5')
                 self.deconv5 = nn.Conv2DTranspose(512, 4, strides=2, padding=1,  prefix='deconv5')
 
-            self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
+            if self.strides[1] == self.strides[2]:
+                self.upsamp4 = nn.Conv2D(2, 3, strides=1, padding=1, prefix='upsamp4')
+                self.deconv4 = nn.Conv2D(256, 3, strides=1, padding=1, prefix='deconv4')
+            else:
+                self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
+                self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
+
             self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
             self.upsamp2 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp2')
 
-            self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
             self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
             self.deconv2 = nn.Conv2DTranspose(64,  4, strides=2, padding=1,  prefix='deconv2')
 
@@ -373,7 +500,8 @@ class MultiscaleEpe(nn.HybridBlock):
 def build_network(name):
     network_classes = {
         'Flownet' : Flownet,
-        'FlownetEncoder' : FlownetEncoder
+        'FlownetEncoder' : FlownetEncoder,
+        'FlownetDilation' : FlownetDilation
     }
     if name in network_classes:
         return network_classes[name]
