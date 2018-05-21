@@ -1,0 +1,23 @@
+validation_steps:
+  250
+
+checkpoint_steps:
+  500
+
+dataset:
+  sintel
+
+subsets:
+  - training1
+  - training2
+
+fast:
+  True
+
+optimizer:
+  learning_rate:
+    - [300000, 1.0e-4]
+    - [400000, 5.0e-5]
+    - [500000, 2.5e-5]
+    - [600000, 1.25e-5]
+    - [602500, 0.5e-5]

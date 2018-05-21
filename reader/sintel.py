@@ -9,19 +9,32 @@ import numpy as np
 def list_data(path):
     dataset = dict()
     pattern = re.compile(r'frame_(\d+).png')
+    split = np.loadtxt(r"\\msralab\ProjectData\ehealth02\v-dinliu\Flow2D\Data\Sintel\Sintel_train_val.txt").astype('i4')
     for part in ('training', 'test'):
         dataset[part] = dict()
+        if part == 'training':
+            dataset[part + str(1)] = dict()
+            dataset[part + str(2)] = dict()
         for subset in ('clean', 'final'):
             dataset[part][subset] = []
+            if part == 'training':
+                c = 0
+                dataset[part + str(1)][subset] = []
+                dataset[part + str(2)][subset] = []
             for seq in os.listdir(os.path.join(path, part, subset)):
                 frames = os.listdir(os.path.join(path, part, subset, seq))
                 frames = list(sorted(map(lambda s: int(pattern.match(s).group(1)),
                                      filter(lambda s: pattern.match(s), frames))))
                 for i in frames[:-1]:
-                    dataset[part][subset].append((
+                    entry = [
                         os.path.join(path, part, subset, seq, 'frame_{:04d}.png'.format(i)),
-                        os.path.join(path, part, subset, seq, 'frame_{:04d}.png'.format(i + 1)),
-                        os.path.join(path, part, 'flow', seq, 'frame_{:04d}.flo'.format(i))))
+                        os.path.join(path, part, subset, seq, 'frame_{:04d}.png'.format(i + 1))]
+                    if part == 'training':
+                        entry.append(os.path.join(path, part, 'flow', seq, 'frame_{:04d}.flo'.format(i)))
+                    dataset[part][subset].append(entry)
+                    if part == 'training':
+                        dataset[part + str(split[c])][subset].append(entry)
+                        c = c + 1                        
     return dataset
 
 
@@ -48,6 +61,11 @@ class Flo:
                                 buffer=fp.read(),
                                 order='C')
             return result
+
+    def save(self, arr, fname):
+        with open(fname, 'wb') as fp:
+            fp.write(self.__floheader__)
+            fp.write(arr.astype(np.float32).tobytes())
 
 
 @lru_cache(maxsize=None)

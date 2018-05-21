@@ -5,28 +5,42 @@ from mxnet import nd
 from mxnet.gluon import nn
 
 class ColorAugmentation(nn.HybridBlock):
-    def __init__(self, contrast_range, brightness_sigma, channel_range, batch_size, **kwargs):
+    def __init__(self, contrast_range, brightness_sigma, channel_range, batch_size, shape, noise_range, gamma_range = None, **kwargs):
         super().__init__(**kwargs)
         self._contrast_range = contrast_range
         self._brightness_sigma = brightness_sigma
         self._channel_range = channel_range
         self._batch_size = batch_size
+        self._shape = shape
+        self._noise_range = noise_range
+        self._gamma_range = gamma_range
 
     def hybrid_forward(self, F, img1, img2):
         contrast = F.random.uniform(*self._contrast_range, shape=(self._batch_size, 1, 1, 1)) + 1
         brightness = F.random.normal(scale=self._brightness_sigma, shape=(self._batch_size, 1, 1, 1))
         channel = F.random.uniform(*self._channel_range, shape=(self._batch_size, 3, 1, 1))
+        noise_sigma = F.random.uniform(*self._noise_range)
+        if self._gamma_range is not None:
+            gamma = F.random.uniform(*self._gamma_range)
 
         contrast = contrast.repeat(repeats=3, axis=1)
         brightness = brightness.repeat(repeats=3, axis=1)
         ret = []
         for img in (img1, img2):
-            mean = F.mean(img, keepdims=True, axis=(2,3))
-            ret.append(F.clip(F.broadcast_add(F.broadcast_mul(F.broadcast_minus(img, mean), contrast * channel), (mean + brightness) * channel), 0, 1) )
+            aug = img
+            noise = F.random.normal(scale=1, shape=(self._batch_size, 3) + self._shape)
+            aug = aug + noise * noise_sigma
+            mean = F.mean(aug, keepdims=True, axis=(2,3))
+            aug = F.broadcast_add(F.broadcast_mul(F.broadcast_minus(img, mean), contrast * channel), (mean + brightness) * channel)
+            aug = F.clip(aug, 0, 1)
+            if self._gamma_range is not None:
+                aug = aug ** gamma
+            ret.append(aug)
+
         return ret
 
 class GeometryAugmentation(nn.HybridBlock):
-    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size, relative_angle=None, relative_scale=None):
+    def __init__(self, angle_range, zoom_range, translation_range, target_shape, orig_shape, batch_size, aspect_range = None, relative_angle=None, relative_scale=None):
         super().__init__()
         self._angle_range = tuple(map(lambda x : x / 180 * math.pi, angle_range) )
         self._scale_range = zoom_range
@@ -45,6 +59,7 @@ class GeometryAugmentation(nn.HybridBlock):
         if self._relative:
             self._relative_scale = relative_scale
             self._relative_angle = tuple(map(lambda x : x / 180 * math.pi * relative_angle, angle_range) )
+        self._aspect_range = aspect_range
 
     def _get_relative_transform(self, F):
         aspect_ratio = (self._target_shape[0] - 1) / (self._target_shape[1] - 1)
@@ -71,15 +86,19 @@ class GeometryAugmentation(nn.HybridBlock):
         '''
         rotation = F.random.uniform(*self._angle_range, shape=(self._batch_size))
         scale = F.random.uniform(*self._scale_range, shape=(self._batch_size))
+        if self._aspect_range is not None:
+            aspect_ratio = F.random.uniform(*self._aspect_range, shape=(self._batch_size))
+        else:
+            aspect_ratio = 1
         pad_x, pad_y = 1 - scale * self._unit[0, 0], 1 - scale * self._unit[1, 1]
         translation_x = F.random.uniform(-1, 1, shape=(self._batch_size,)) * pad_x + F.random.uniform(*self._translation_range, shape=(self._batch_size))
         translation_y = F.random.uniform(-1, 1, shape=(self._batch_size,)) * pad_y + F.random.uniform(*self._translation_range, shape=(self._batch_size))
-        affine_params = [scale * rotation.cos() * self._unit[0, 0], scale * -rotation.sin() * self._unit[1, 0], translation_x,
+        affine_params = [scale * aspect_ratio * rotation.cos() * self._unit[0, 0], scale * aspect_ratio * -rotation.sin() * self._unit[1, 0], translation_x,
                          scale * rotation.sin() * self._unit[0, 1], scale * rotation.cos() * self._unit[1, 1],  translation_y] 
         affine_params = F.stack(*affine_params, axis=1)
         affine_inverse = F.stack(
-                rotation.cos() / scale, 
-                rotation.sin() / scale,
+                rotation.cos() / (scale * aspect_ratio), 
+                rotation.sin() / (scale * aspect_ratio),
                 -rotation.sin() / scale, 
                 rotation.cos() / scale,
                 axis=1
@@ -160,6 +179,8 @@ class GeometryAugmentationCpu:
         '''
             params : dictionary of augmentation parameters
         '''
+        # pylint : disable=E1101
+
         img1, img2, flow = data
         rows, cols = img1.shape[:2]
         center = cols / 2 - 0.5, rows / 2 - 0.5
@@ -171,7 +192,7 @@ class GeometryAugmentationCpu:
         # offset = [ np.random.randint(0, s - ts + 1) for s, ts in zip(concat_img.shape, self._target_shape) ]
         offset = [ (s - ts) // 2 for s, ts in zip(concat_img.shape, self._target_shape) ]
         crop_range = [slice(o, o + s) for o, s in zip(offset, self._target_shape)]
-        concat_img = skimage.transform.warp(concat_img.astype(np.float64), transform)[crop_range]
+        concat_img = skimage.transform.warp(concat_img.astype(np.float64), transform)[crop_range] 
 
         flow = concat_img[..., 6:8]
         rinv = np.linalg.inv(transform.params[:2, :2]).transpose()

@@ -5,6 +5,27 @@ from mxnet.gluon import nn
 
 from . import layer
 
+
+class SequentialFeatures(nn.HybridBlock):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.layers = []
+        with self.name_scope():
+            self.net = nn.HybridSequential()
+    
+    def _output(self):
+        self.layers.append(len(self.net) - 1)
+
+    def hybrid_forward(self, F, img):
+        feature = img
+        ret = []
+        for i, layer in enumerate(self.net):
+            feature = layer(feature)
+            if i in self.layers:
+                ret.append(feature)
+        return ret
+
+
 class Downsample(nn.HybridBlock):
     def __init__(self, factor, channels=2, **kwargs):
         super().__init__(**kwargs)
@@ -60,6 +81,74 @@ class Upsample(nn.HybridBlock):
         img = F.pad(img, mode='edge', pad_width=(0, 0, 0, 0, 0, 1, 0, 1))
         return F.slice(self.upsamp(img), begin=(None, None, None, None), end=(None, None, -1, -1))
 
+class ASSP(nn.HybridBlock):
+    def __init__(self, channels, conv_params, pooling, **kwargs):
+        super().__init__(**kwargs)
+        self.conv_params = conv_params
+        self.pooling = pooling
+        with self.name_scope():
+            for kernel_size, r in conv_params:
+                net = nn.HybridSequential()
+                net.add(nn.Conv2D(channels, kernel_size, padding=r * (kernel_size // 2), dilation=r, prefix='atrous_%d' % r))
+                net.add(nn.LeakyReLU(0.1))
+                setattr(self, 'atrous_%d' % r, net)
+        if pooling:
+            self.pool = net = nn.HybridSequential()
+            net.add(nn.GlobalAvgPool2D())
+            net.add(nn.Dense(channels))
+            net.add(nn.LeakyReLU(0.1))
+
+        self.merge = net = nn.HybridSequential()
+        net.add(nn.Conv2D(channels, 1))
+        net.add(nn.LeakyReLU(0.1))
+
+    def hybrid_forward(self, F, x):
+        features = [ getattr(self, 'atrous_%s' % r)(x) for _, r in self.conv_params]
+        if hasattr(self, 'pool'):
+            global_feature = self.pool(x)
+            global_feature = F.reshape(global_feature, (0, 0, 1, 1))
+            features.append(F.broadcast_add(global_feature, F.zeros_like(x)))
+        return self.merge(F.concat(*features, dim=1))
+
+
+class ConvHead(SequentialFeatures):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self._conv_bn_relu(64, 7, strides=2, prefix='conv1')
+            self.net.add(nn.MaxPool2D(3, 2, 1)) # stride = 4
+            self._conv_bn_relu(64, 3, strides=1, prefix='conv2')
+            self._conv_bn_relu(64, 3, strides=2, prefix='conv3')
+            self._conv_bn_relu(64, 3, strides=1, prefix='conv3_1') # stride = 8
+            self._output()
+
+    def _conv_bn_relu(self, channels, kernel, strides=1, **kwargs):
+        self.net.add(nn.Conv2D(channels, kernel, strides=strides, padding=(kernel - 1) // 2, use_bias=False, 
+            weight_initializer=mx.initializer.Xavier(rnd_type='gaussian', factor_type='out', magnitude=2), 
+            **kwargs))
+        self.net.add(nn.BatchNorm())
+        self.net.add(nn.LeakyReLU(0.1))
+
+class ExtraFlowEncoder(nn.HybridBlock):
+    def __init__(self, config, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.stride = 8
+            if config.downsample.value == 'conv':
+                self.encoder = ConvHead()
+            elif config.downsample.value == 'bilinear':
+                self.encoder = Downsample(self.stride, channels=3)
+            self.conv = net = nn.HybridSequential()
+            net.add(nn.Conv2D(64, 7, padding=3)) 
+            net.add(nn.LeakyReLU(0.1))
+
+    def hybrid_forward(self, F, img1, img2):
+        feature = F.concat(self.encoder(img1), 
+                           self.encoder(img2), 
+                           dim=1)
+        return self.conv(feature)
+
+
 class FlownetDilation(nn.HybridBlock):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
@@ -69,13 +158,12 @@ class FlownetDilation(nn.HybridBlock):
             self.conv1   = nn.Conv2D(64, 7, strides=2, padding=3, prefix='conv1')
             self.conv2   = nn.Conv2D(128, 5, strides=2, padding=2, prefix='conv2')
             self.conv3   = nn.Conv2D(256, 5, strides=2, padding=2, prefix='conv3')
+            if config.encoder.get(None) is not None:
+                self.extra_flow = ExtraFlowEncoder(config.encoder, prefix='flowenc')
             self.conv3_1 = nn.Conv2D(256, 3, strides=1, padding=1, prefix='conv3_1')
             self.conv4   = nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv4')
             self.conv4_1 = nn.Conv2D(512, 3, strides=1, padding=1, prefix='conv4_1')
 
-            
-            self.impl = config.network.implementation.get('normal')
-            
             dilation = 1
 
             dilation_5 = config.network.conv5.dilation.get(False)
@@ -104,15 +192,20 @@ class FlownetDilation(nn.HybridBlock):
                 self.conv6_net.add(nn.Conv2D(512, 3, strides=2, padding=1, prefix='conv6'))
                 self.conv6_net.add(nn.LeakyReLU(0.1))
 
-            for i in range(1, config.network.conv6.layers.get(2)):
-                self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_%d' % i))
-                self.conv6_net.add(nn.LeakyReLU(0.1))
-                print('conv6_%d Dilation%d' % (i, dilation))
+            if config.network.conv6.assp.get(None) is not None:
+                self.conv6_net.add(ASSP(512, config.network.conv6.assp.conv_params.value, config.network.conv6.assp.pooling.value, prefix='assp'))
+            else:
+                for i in range(1, config.network.conv6.layers.get(2)):
+                    self.conv6_net.add(nn.Conv2D(512, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv6_%d' % i))
+                    self.conv6_net.add(nn.LeakyReLU(0.1))
+                    print('conv6_%d Dilation%d' % (i, dilation))
 
             if dilation == 4:
                 self.strides = [16, 16, 16, 8, 4]
-            else:
+            elif dilation == 2:
                 self.strides = [32, 32, 16, 8, 4]
+            else:
+                self.strides = [64, 32, 16, 8, 4]
             print('Strides', self.strides)
 
             self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
@@ -147,7 +240,10 @@ class FlownetDilation(nn.HybridBlock):
         concat_img = F.concat(img1, img2, dim=1)
         conv1 = nn.LeakyReLU(0.1)(self.conv1(concat_img))
         conv2 = nn.LeakyReLU(0.1)(self.conv2(conv1))
-        conv3 = nn.LeakyReLU(0.1)(self.conv3_1(nn.LeakyReLU(0.1)(self.conv3(conv2))))
+        conv3 = nn.LeakyReLU(0.1)(self.conv3(conv2))
+        if hasattr(self, 'extra_flow'):
+            conv3 = F.concat(conv3, self.extra_flow(img1, img2), dim=1)
+        conv3 = nn.LeakyReLU(0.1)(self.conv3_1(conv3))
         conv4 = nn.LeakyReLU(0.1)(self.conv4_1(nn.LeakyReLU(0.1)(self.conv4(conv3))))
         conv5 = self.conv5_net(conv4)
         conv6 = self.conv6_net(conv5)
@@ -307,26 +403,6 @@ class Flownet(nn.HybridBlock):
         pred2 = self.pred2(concat2)
 
         return pred6, pred5, pred4, pred3, pred2
-
-class SequentialFeatures(nn.HybridBlock):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.layers = []
-        with self.name_scope():
-            self.net = nn.HybridSequential()
-    
-    def _output(self):
-        self.layers.append(len(self.net) - 1)
-
-    def hybrid_forward(self, F, img):
-        feature = img
-        ret = []
-        for i, layer in enumerate(self.net):
-            feature = layer(feature)
-            if i in self.layers:
-                ret.append(feature)
-        return ret
-
 
 class ConvEncoder(SequentialFeatures):
     def __init__(self, config=dict(), **kwargs):

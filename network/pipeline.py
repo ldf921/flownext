@@ -11,6 +11,7 @@ class PipelineBase:
         self.trainer = trainer
         self.lr_schedule = lr_schedule
         self.ctx = ctx
+        self._lr = None
         pass
 
     def preprocess(self, img):
@@ -50,7 +51,12 @@ class PipelineBase:
         except IndexError:
             return False
         self.trainer.set_learning_rate(lr)
+        self._lr = lr
         return True
+
+    @property
+    def lr(self):
+        return self._lr
 
     def train_batch(self, img1, img2, flow, aug, geo_aug):
         losses = []
@@ -108,6 +114,8 @@ class PipelineBase:
 
 
 class PipelineFlownet:
+    _lr = None
+
     def __init__(self, ctx, config):
         config = Reader(config)
         self.ctx = ctx
@@ -150,7 +158,12 @@ class PipelineFlownet:
         except IndexError:
             return False
         self.trainer.set_learning_rate(lr)
+        self._lr = lr
         return True    
+
+    @property
+    def lr(self):
+        return self._lr
 
     def loss(self, pred, label):
         return self.multiscale_epe(label / self.scale, *pred)
@@ -190,6 +203,11 @@ class PipelineFlownet:
         pred = self.network(img1 - rgb_mean, img2 - rgb_mean)
         return pred
 
+    def predict_batch(self, img1, img2):
+        shape = img1.shape
+        pred = self.predict_batch_mx(img1, img2, flow = None)
+        return (self.upsampler(pred[-1])[:, :, :shape[2], :shape[3]] * self.scale).asnumpy()
+
     def validate_batch(self, img1, img2, flow):
         shape = img1.shape
         pred = self.predict_batch_mx(img1, img2, flow)
@@ -218,6 +236,21 @@ class PipelineFlownet:
 
             batchEpe.append(self.validate_batch(batch_img1, batch_img2, batch_flow))
         return np.mean(np.concatenate(batchEpe))
+
+    def predict(self, img1, img2, batch_size):
+        ''' predict the whole dataset
+        '''
+        size = len(img1)
+        for j in range(0, size, batch_size):
+            batch_img1 = img1[j: j + batch_size]
+            batch_img2 = img2[j: j + batch_size]
+
+            batch_img1 = nd.array(np.transpose(np.stack(batch_img1, axis=0), (0, 3, 1, 2)) / 255.0, ctx=self.ctx[0])
+            batch_img2 = nd.array(np.transpose(np.stack(batch_img2, axis=0), (0, 3, 1, 2)) / 255.0, ctx=self.ctx[0])
+
+            ret = self.predict_batch(batch_img1, batch_img2)
+            for k in range(len(ret)):
+                yield ret[k]
 
     def validate_levels(self, img1, img2, flow, batch_size):
         ''' validate the whole dataset at each sample level
