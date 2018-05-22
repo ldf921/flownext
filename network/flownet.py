@@ -149,6 +149,27 @@ class ExtraFlowEncoder(nn.HybridBlock):
         return self.conv(feature)
 
 
+class FuseConv(nn.HybridBlock):
+    def __init__(self, channels, output_stride, dilation=1, **kwargs):
+        super().__init__(**kwargs)
+        with self.name_scope():
+            self.pred = nn.Conv2D(2, 3, padding=1, prefix='pred')
+            self.conv = nn.Conv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv')
+            self.deform = layer.DeformableConv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, use_bias=False, prefix='deform')
+            self.upsamp = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp')
+            self.output_stride = output_stride
+
+    def hybrid_forward(self, F, flow, feature, shortcut):
+        concat = F.concat(flow, feature, shortcut, dim=1)
+        flow = self.pred(concat)
+
+        offset = F.repeat(F.expand_dims(F.flip(flow * 20 / self.output_stride, axis=1), axis=1), 9, axis=1)
+        offset = F.reshape(offset, (0, -3, -2))
+
+        deconv = nn.LeakyReLU(0.1)(self.conv(concat) + self.deform(shortcut, offset))
+        return self.upsamp(flow), deconv, flow
+        
+
 class FlownetDilation(nn.HybridBlock):
     def __init__(self, config, **kwargs):
         super().__init__(**kwargs)
@@ -208,8 +229,10 @@ class FlownetDilation(nn.HybridBlock):
                 self.strides = [64, 32, 16, 8, 4]
             print('Strides', self.strides)
 
+            deform_decode5 = config.network.decode5.deform.get(False)
             self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
-            self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
+            if not deform_decode5:
+                self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
             self.pred4   = nn.Conv2D(2, 3, padding=1, prefix='pred4')
             self.pred3   = nn.Conv2D(2, 3, padding=1, prefix='pred3')
             self.pred2   = nn.Conv2D(2, 3, padding=1, prefix='pred2')
@@ -222,13 +245,19 @@ class FlownetDilation(nn.HybridBlock):
                 self.upsamp5 = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp5')
                 self.deconv5 = nn.Conv2DTranspose(512, 4, strides=2, padding=1,  prefix='deconv5')
 
-            if self.strides[1] == self.strides[2]:
-                dilation = dilation // 2
-                self.upsamp4 = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp4')
-                self.deconv4 = nn.Conv2D(256, 3, strides=1, padding=dilation, dilation=dilation, prefix='deconv4')
+            if deform_decode5:
+                self.fuse5 = FuseConv(256, output_stride=self.strides[1], prefix='fuse5')
+                print('deformable fusing')
             else:
-                self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
-                self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
+                if self.strides[1] == self.strides[2]:
+                    dilation = dilation // 2
+                    self.upsamp4 = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp4')
+                    self.deconv4 = nn.Conv2D(256, 3, strides=1, padding=dilation, dilation=dilation, prefix='deconv4')
+                else:
+                    self.upsamp4 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp4')
+                    self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
+            
+            self.deform_decode5 = deform_decode5
 
             self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
             self.upsamp2 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp2')
@@ -250,10 +279,16 @@ class FlownetDilation(nn.HybridBlock):
 
         pred6 = self.pred6(conv6)
 
-        concat5 = F.concat(self.upsamp5(pred6), nn.LeakyReLU(0.1)(self.deconv5(conv6)), conv5, dim=1)
-        pred5 = self.pred5(concat5)
+        if self.deform_decode5:
+            upsamp4, deconv4, pred5 = self.fuse5(self.upsamp5(pred6), nn.LeakyReLU(0.1)(self.deconv5(conv6)), conv5)
+        else:
+            concat5 = F.concat(self.upsamp5(pred6), nn.LeakyReLU(0.1)(self.deconv5(conv6)), conv5, dim=1)
+            pred5 = self.pred5(concat5)
 
-        concat4 = F.concat(self.upsamp4(pred5), nn.LeakyReLU(0.1)(self.deconv4(concat5)), conv4, dim=1)
+            upsamp4 = self.upsamp4(pred5)
+            deconv4 = nn.LeakyReLU(0.1)(self.deconv4(concat5))
+
+        concat4 = F.concat(upsamp4, deconv4, conv4, dim=1)
         pred4 = self.pred4(concat4)
 
         concat3 = F.concat(self.upsamp3(pred4), nn.LeakyReLU(0.1)(self.deconv3(concat4)), conv3, dim=1)
