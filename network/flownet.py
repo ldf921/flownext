@@ -150,23 +150,33 @@ class ExtraFlowEncoder(nn.HybridBlock):
 
 
 class FuseConv(nn.HybridBlock):
-    def __init__(self, channels, output_stride, dilation=1, **kwargs):
+    def __init__(self, channels, output_stride, dilation=1, upsample=False, **kwargs):
         super().__init__(**kwargs)
         with self.name_scope():
             self.pred = nn.Conv2D(2, 3, padding=1, prefix='pred')
-            self.conv = nn.Conv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv')
-            self.deform = layer.DeformableConv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, use_bias=False, prefix='deform')
-            self.upsamp = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp')
             self.output_stride = output_stride
+            self.upsample = upsample
+            if self.upsample:
+                self.conv = nn.Conv2DTranspose(channels, 4, strides=2, padding=1, prefix='conv')
+                self.upsamp = nn.Conv2DTranspose(2, 4, strides=2, padding=1, prefix='upsamp')
+                self.deform = layer.DeformableConv2D(channels * 2, 3, strides=1, padding=1, use_bias=False, prefix='deform_flow')
+                self.cf = nn.Conv2D(channels * 2, 3, strides=1, padding=1, prefix='conv_flow')
+            else:
+                self.conv = nn.Conv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, prefix='conv')
+                self.deform = layer.DeformableConv2D(channels, 3, strides=1, padding=dilation, dilation=dilation, use_bias=False, prefix='deform')
+                self.upsamp = nn.Conv2D(2, 3, strides=1, padding=dilation, dilation=dilation, prefix='upsamp')
 
     def hybrid_forward(self, F, flow, feature, shortcut):
         concat = F.concat(flow, feature, shortcut, dim=1)
         flow = self.pred(concat)
-
         offset = F.repeat(F.expand_dims(F.flip(flow * 20 / self.output_stride, axis=1), axis=1), 9, axis=1)
         offset = F.reshape(offset, (0, -3, -2))
 
-        deconv = nn.LeakyReLU(0.1)(self.conv(concat) + self.deform(shortcut, offset))
+        if self.upsample:
+            fuse = nn.LeakyReLU(0.1)(self.cf(concat) + self.deform(shortcut, offset))
+            deconv = nn.LeakyReLU(0.1)(self.conv(fuse))
+        else:
+            deconv = nn.LeakyReLU(0.1)(self.conv(concat) + self.deform(shortcut, offset))
         return self.upsamp(flow), deconv, flow
         
 
@@ -233,7 +243,6 @@ class FlownetDilation(nn.HybridBlock):
             self.pred6   = nn.Conv2D(2, 3, padding=1, prefix='pred6')
             if not deform_decode5:
                 self.pred5   = nn.Conv2D(2, 3, padding=1, prefix='pred5')
-            self.pred4   = nn.Conv2D(2, 3, padding=1, prefix='pred4')
             self.pred3   = nn.Conv2D(2, 3, padding=1, prefix='pred3')
             self.pred2   = nn.Conv2D(2, 3, padding=1, prefix='pred2')
 
@@ -258,11 +267,16 @@ class FlownetDilation(nn.HybridBlock):
                     self.deconv4 = nn.Conv2DTranspose(256, 4, strides=2, padding=1,  prefix='deconv4')
             
             self.deform_decode5 = deform_decode5
+            self.deform_decode4 = config.network.decode4.deform.get(False)
 
-            self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
+            if self.deform_decode4:
+                self.fuse4 = FuseConv(128, output_stride=self.strides[2], upsample=True, prefix='fuse4')
+            else:
+                self.upsamp3 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp3')
+                self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
+                self.pred4   = nn.Conv2D(2, 3, padding=1, prefix='pred4')
+
             self.upsamp2 = nn.Conv2DTranspose(2, 4, strides=2, padding=1,  prefix='upsamp2')
-
-            self.deconv3 = nn.Conv2DTranspose(128, 4, strides=2, padding=1,  prefix='deconv3')
             self.deconv2 = nn.Conv2DTranspose(64,  4, strides=2, padding=1,  prefix='deconv2')
 
     def hybrid_forward(self, F, img1, img2):
@@ -288,10 +302,16 @@ class FlownetDilation(nn.HybridBlock):
             upsamp4 = self.upsamp4(pred5)
             deconv4 = nn.LeakyReLU(0.1)(self.deconv4(concat5))
 
-        concat4 = F.concat(upsamp4, deconv4, conv4, dim=1)
-        pred4 = self.pred4(concat4)
+        if self.deform_decode4:
+            upsamp3, deconv3, pred4 = self.fuse4(upsamp4, deconv4, conv4)
+        else:
+            concat4 = F.concat(upsamp4, deconv4, conv4, dim=1)
 
-        concat3 = F.concat(self.upsamp3(pred4), nn.LeakyReLU(0.1)(self.deconv3(concat4)), conv3, dim=1)
+            pred4 = self.pred4(concat4)
+            upsamp3 = self.upsamp3(pred4)
+            deconv3 = nn.LeakyReLU(0.1)(self.deconv3(concat4))
+
+        concat3 = F.concat(upsamp3, deconv3, conv3, dim=1)
         pred3 = self.pred3(concat3)
 
         concat2 = F.concat(self.upsamp2(pred3), nn.LeakyReLU(0.1)(self.deconv2(concat3)), conv2, dim=1)
